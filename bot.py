@@ -42,6 +42,67 @@ def split_json_objects(text):
                 start_index = -1
     return objs
 
+def extract_links_from_json(json_text):
+    """Парсит JSON и конвертирует outbounds в vless:// или ss:// ссылки."""
+    links = []
+    try:
+        data = json.loads(json_text)
+        # Если это конфиг типа "автовыбор", ищем внутри outbounds
+        outbounds = data.get("outbounds", [])
+        
+        # Если outbounds пуст, возможно это просто одиночный объект сервера
+        if not outbounds and data.get("protocol"):
+            outbounds = [data]
+
+        for out in outbounds:
+            protocol = out.get("protocol")
+            tag = out.get("tag", "node").replace(" ", "_")
+            
+            if protocol == "vless":
+                try:
+                    vnext = out["settings"]["vnext"][0]
+                    user = vnext["users"][0]
+                    addr = vnext["address"]
+                    port = vnext["port"]
+                    uuid = user["id"]
+                    flow = user.get("flow", "")
+                    
+                    ss = out.get("streamSettings", {})
+                    net = ss.get("network", "tcp")
+                    sec = ss.get("security", "none")
+                    
+                    params = [f"type={net}", f"security={sec}"]
+                    if flow: params.append(f"flow={flow}")
+                    
+                    if sec == "reality":
+                        r_settings = ss.get("realitySettings", {})
+                        params.append(f"sni={r_settings.get('serverName', '')}")
+                        params.append(f"pbk={r_settings.get('publicKey', '')}")
+                        params.append(f"sid={r_settings.get('shortId', '')}")
+                        params.append(f"fp={r_settings.get('fingerprint', 'chrome')}")
+                    
+                    if net == "ws":
+                        ws_settings = ss.get("wsSettings", {})
+                        params.append(f"path={ws_settings.get('path', '/')}")
+                        params.append(f"host={ws_settings.get('headers', {}).get('Host', '')}")
+                    elif net == "grpc":
+                        g_settings = ss.get("grpcSettings", {})
+                        params.append(f"serviceName={g_settings.get('serviceName', '')}")
+
+                    query = "&".join(params)
+                    links.append(f"vless://{uuid}@{addr}:{port}?{query}#{tag}")
+                except: continue
+
+            elif protocol == "shadowsocks":
+                try:
+                    server = out["settings"]["servers"][0]
+                    user_data = base64.b64encode(f"{server['method']}:{server['password']}".encode()).decode()
+                    links.append(f"ss://{user_data}@{server['address']}:{server['port']}#{tag}")
+                except: continue
+                
+    except: pass
+    return links
+
 def decrypt_via_api(happ_link):
     api_url = "https://api.sayori.cc/v1/decrypt"
     headers = {"Content-Type": "application/json", "x-api-key": SAYORI_KEY}
@@ -78,59 +139,53 @@ def handle_message(m):
     if decrypted_url:
         sub_link = decrypted_url.strip()
         content = ""
-        error_info = ""
-
         try:
-            # Упрощенные заголовки, чтобы не ловить 500 ошибку
-            sub_headers = {
-                'User-Agent': random.choice(USER_AGENTS),
-                'Accept': '*/*'
-            }
-            time.sleep(1) 
-            sub_res = requests.get(sub_link, headers=sub_headers, timeout=15)
-            
+            sub_res = requests.get(sub_link, headers={'User-Agent': random.choice(USER_AGENTS)}, timeout=15)
             if sub_res.status_code == 200:
                 raw = sub_res.text.strip()
                 try:
-                    # Попытка Base64
                     pad = len(raw) % 4
                     if pad: raw += '=' * (4 - pad)
                     content = base64.b64decode(raw).decode('utf-8', errors='ignore')
-                except:
-                    content = raw
+                except: content = raw
             else:
-                error_info = f"⚠️ Ошибка сервера: {sub_res.status_code}"
+                bot.edit_message_text(f"❌ Ошибка сервера: {sub_res.status_code}", m.chat.id, status_msg.message_id)
+                return
         except Exception as e:
-            error_info = f"❌ Ошибка: {str(e)[:30]}"
-
-        if error_info:
-            bot.edit_message_text(f"❌ Не удалось загрузить данные.\n{error_info}", m.chat.id, status_msg.message_id)
+            bot.edit_message_text(f"❌ Ошибка: {str(e)[:30]}", m.chat.id, status_msg.message_id)
             return
 
-        user_storage[m.chat.id] = content
+        all_links = []
+        # 1. Обычные ссылки
+        direct_links = [l.strip() for l in content.split('\n') if '://' in l and not l.strip().startswith('{')]
+        all_links.extend(direct_links)
         
-        # Анализ
+        # 2. Извлечение из JSON
         jsons = split_json_objects(content)
-        links = [l.strip() for l in content.split('\n') if '://' in l and not l.strip().startswith('{')]
+        for j_obj in jsons:
+            all_links.extend(extract_links_from_json(j_obj))
+        
+        if not all_links:
+            bot.edit_message_text("❌ Внутри подписки пусто.", m.chat.id, status_msg.message_id)
+            return
+
+        user_storage[m.chat.id] = "\n".join(all_links)
         
         stats = {}
-        for l in links:
+        for l in all_links:
             proto = l.split('://')[0].upper()
             stats[proto] = stats.get(proto, 0) + 1
         stats_info = "\n".join([f"🔹 {k}: `{v}`" for k, v in stats.items()])
 
         report = (
             f"✅ **Готово!**\n\n"
-            f"🔗 **Ссылка:**\n`{sub_link}`\n\n"
-            f"🔗 Ссылки: `{len(links)} шт.`\n"
-            f"📦 JSON-конфиги: `{len(jsons)} шт.`\n"
-            f"{stats_info}"
+            f"🚀 Всего серверов: `{len(all_links)} шт.`\n"
+            f"📦 Распаковано JSON: `{len(jsons)}` объектов\n"
+            f"━━━━━━━━━━━━━━━\n{stats_info}"
         )
         
         kb = types.InlineKeyboardMarkup()
-        if content:
-            kb.add(types.InlineKeyboardButton("📥 Скачать All Config", callback_data="get_all"))
-        
+        kb.add(types.InlineKeyboardButton("📥 Скачать All Config (.txt)", callback_data="get_all"))
         bot.edit_message_text(report, m.chat.id, status_msg.message_id, parse_mode='Markdown', reply_markup=kb)
     else:
         bot.edit_message_text("❌ Ошибка расшифровки.", m.chat.id, status_msg.message_id)
@@ -138,17 +193,19 @@ def handle_message(m):
 @bot.callback_query_handler(func=lambda c: c.data == "get_all")
 def get_all(call):
     content = user_storage.get(call.message.chat.id)
-    if not content: return
+    if not content:
+        bot.answer_callback_query(call.id, "Данные не найдены. Попробуй еще раз.")
+        return
     
-    is_json = content.strip().startswith('{')
-    if len(content) < 3000:
-        bot.send_message(call.message.chat.id, f"```\n{content}\n```", parse_mode='Markdown')
-    else:
-        file_path = f"sub_{call.message.chat.id}.{'json' if is_json else 'txt'}"
-        with open(file_path, "w", encoding="utf-8") as f: f.write(content)
-        with open(file_path, "rb") as f:
-            bot.send_document(call.message.chat.id, f)
-        if os.path.exists(file_path): os.remove(file_path)
+    # Отправляем текстовым файлом
+    file_path = f"sub_{call.message.chat.id}.txt"
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    
+    with open(file_path, "rb") as f:
+        bot.send_document(call.message.chat.id, f, caption="Все найденные конфиги (ссылки)")
+    
+    os.remove(file_path)
     bot.answer_callback_query(call.id)
 
 bot.polling()
