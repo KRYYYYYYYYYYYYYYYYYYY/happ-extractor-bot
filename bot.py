@@ -21,11 +21,10 @@ def decrypt_via_api(happ_link):
             data = res.json()
             return data.get("result") if data.get("success") else None
         return None
-    except:
-        return None
+    except: return None
 
 def extract_happ_raw(url):
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0'}
     try:
         url_dec = unquote(url)
         if 'happ://' in url_dec:
@@ -46,55 +45,82 @@ def handle_message(m):
     happ_link = text if text.startswith('happ://') else extract_happ_raw(text)
     
     if not happ_link:
-        bot.reply_to(m, "❌ Ссылка не найдена в сообщении.")
+        bot.reply_to(m, "❌ Ссылка не найдена.")
         return
 
-    # 1. Отправляем сообщение о начале работы
     status_msg = bot.reply_to(m, "⏳ *Расшифровываю...*", parse_mode='Markdown')
-    
     decrypted_data = decrypt_via_api(happ_link)
     
     if decrypted_data and '://' in decrypted_data:
-        # Чистим данные
         configs = [line.strip() for line in decrypted_data.split('\n') if '://' in line]
-        # Сохраняем для кнопки (двойной перенос для удобства копирования)
-        user_storage[m.chat.id] = "\n\n".join(configs)
+        user_storage[m.chat.id] = configs # Храним как список
         
-        # Считаем статистику
         stats = {}
         for c in configs:
             proto = c.split('://')[0].upper()
             stats[proto] = stats.get(proto, 0) + 1
         
         stats_info = "\n".join([f"🔹 {k}: `{v}`" for k, v in stats.items()])
-        report = (
-            f"✅ **Успешно расшифровано!**\n\n"
-            f"📊 Всего найдено: `{len(configs)}` конфигов\n"
-            f"{stats_info}\n\n"
-            f"Нажми кнопку ниже, чтобы получить готовый список."
-        )
+        report = f"✅ **Готово!**\n\n📊 Найдено: `{len(configs)}` конфигов\n{stats_info}"
         
         kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton("📋 Показать конфиги", callback_data="get_data"))
+        kb.add(types.InlineKeyboardButton("⚙️ Дополнительно", callback_data="menu_extra"))
         
-        # 2. РЕДАКТИРУЕМ то же самое сообщение, заменяя "Расшифровываю" на результат
         bot.edit_message_text(report, m.chat.id, status_msg.message_id, parse_mode='Markdown', reply_markup=kb)
     else:
-        bot.edit_message_text("❌ Ошибка: Не удалось расшифровать данные через API.", m.chat.id, status_msg.message_id)
+        bot.edit_message_text("❌ Ошибка дешифровки.", m.chat.id, status_msg.message_id)
 
-@bot.callback_query_handler(func=lambda c: c.data == "get_data")
-def send_data(call):
-    data = user_storage.get(call.message.chat.id)
-    if data:
-        # Если текста не слишком много для одного сообщения ТГ
-        if len(data) < 3900:
-            bot.send_message(call.message.chat.id, f"```\n{data}\n```", parse_mode='Markdown')
-        else:
-            # Если конфигов очень много — отправляем файлом
-            with open("configs.txt", "w", encoding="utf-8") as f: f.write(data)
-            bot.send_document(call.message.chat.id, open("configs.txt", "rb"), caption="🔥 Твой список конфигов")
-        bot.answer_callback_query(call.id, "Список отправлен!")
+@bot.callback_query_handler(func=lambda c: c.data == "menu_extra")
+def menu_extra(call):
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("✂️ По отдельности", callback_data="get_sep"))
+    kb.add(types.InlineKeyboardButton("📦 All Config (одним файлом/блоком)", callback_data="get_all"))
+    kb.add(types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back"))
+    bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda c: c.data == "get_sep")
+def get_sep(call):
+    configs = user_storage.get(call.message.chat.id)
+    if not configs: return
+    
+    # Выводим первые 10-15 для примера, чтобы не спамить
+    text = "📝 **Конфиги по отдельности:**\n\n"
+    for c in configs[:20]: # Ограничим 20 штуками в одном сообщении для чистоты
+        text += f"```\n{c}\n```\n"
+    
+    if len(configs) > 20:
+        text += f"\n_...и еще {len(configs)-20} конфигов. Для полного списка используй 'All Config'_"
+        
+    bot.send_message(call.message.chat.id, text, parse_mode='Markdown')
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda c: c.data == "get_all")
+def get_all(call):
+    configs = user_storage.get(call.message.chat.id)
+    if not configs: return
+    
+    full_text = "\n".join(configs)
+    
+    if len(full_text) < 3800:
+        bot.send_message(call.message.chat.id, f"```\n{full_text}\n```", parse_mode='Markdown')
     else:
-        bot.answer_callback_query(call.id, "Данные не найдены, отправь ссылку заново.", show_alert=True)
+        # Решаем проблему лимитов через файл
+        file_path = f"configs_{call.message.chat.id}.txt"
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(full_text)
+        
+        with open(file_path, "rb") as f:
+            bot.send_document(call.message.chat.id, f, caption="📂 Все конфиги в одном файле. Его можно импортировать в V2Ray/Nekobox.")
+        os.remove(file_path) # Удаляем временный файл
+        
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda c: c.data == "menu_back")
+def menu_back(call):
+    # Тут можно вернуть старую клавиатуру с кнопкой "Дополнительно"
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("⚙️ Дополнительно", callback_data="menu_extra"))
+    bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=kb)
+    bot.answer_callback_query(call.id)
 
 bot.polling()
