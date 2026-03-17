@@ -95,68 +95,63 @@ def fetch_and_report(chat_id, sub_url, message_id):
     error_code = None
     
     try:
-        # Добавляем Accept-Encoding, чтобы GitHub отдавал читаемые данные
         headers = {
             'User-Agent': random.choice(USER_AGENTS),
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive'
+            'Accept-Encoding': 'gzip, deflate',  # Явно говорим, что понимаем сжатие
         }
-        time.sleep(random.uniform(1, 2))
+        # Делаем запрос
         res = requests.get(sub_url, headers=headers, timeout=15)
         error_code = res.status_code
         
         if res.status_code == 200:
-            # Использование res.content надежнее для бинарных данных (gzip)
-            try:
+            # res.text может тупить со сжатием, используем автоматический декодер
+            res.encoding = res.apparent_encoding
+            raw = res.text.strip()
+            
+            # Если в начале всё равно "мусор", пробуем принудительно прочитать через content
+            if len(raw) > 0 and (ord(raw[0]) < 32 and raw[0] not in '\n\r\t'):
                 raw = res.content.decode('utf-8', errors='ignore').strip()
-            except:
-                raw = res.text.strip()
 
-            # Проверка на Base64 (не ломаем старое)
+            # Проверка на Base64
             try:
                 clean_raw = re.sub(r'[^a-zA-Z0-9+/=]', '', raw)
                 if len(clean_raw) > 30:
                     decoded = base64.b64decode(clean_raw).decode('utf-8', errors='ignore')
                     content = decoded if '://' in decoded or '{' in decoded else raw
-                else:
-                    content = raw
-            except:
-                content = raw
-    except Exception as e:
-        error_code = str(e)[:20]
+                else: content = raw
+            except: content = raw
+    except Exception as e: error_code = str(e)[:20]
 
     if not content or (isinstance(error_code, int) and error_code >= 400):
         kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton("🔑 Принудительно через API", callback_data="force_api"))
-        bot.edit_message_text(f"❌ Ошибка (Код: {error_code})", chat_id, message_id, reply_markup=kb)
+        kb.add(types.InlineKeyboardButton("🔑 API принудительно", callback_data="force_api"))
+        bot.edit_message_text(f"❌ Ошибка: {error_code}", chat_id, message_id, reply_markup=kb)
         return
 
     user_storage[chat_id] = content
     
-    # --- Улучшенный поиск: ищет ссылки по всему тексту, а не только в начале строки ---
+    # Регулярка для поиска прокси-ссылок
     links = re.findall(r'(vless|vmess|ss|trojan|shadowsocks|tuic|hysteria2?)://[^\s"\'<>]+', content)
-    
-    # Проверка на JSON структуру (для Атланты и твоих блоков)
     has_json = '"outbounds"' in content or ('{' in content and '"' in content)
     
     if links:
-        json_note = "ℹ️ Текстовая подписка" + (" (+ JSON)" if has_json else "")
+        status_text = "ℹ️ Текстовая подписка" + (" (+ JSON)" if has_json else "")
     elif has_json:
-        json_note = "✅ Обнаружен JSON конфиг"
+        status_text = "✅ JSON Конфигурация"
     else:
-        json_note = "📄 Текстовый файл"
+        status_text = "📄 Текстовый файл"
 
     report = (
         f"✅ **Готово!**\n\n"
-        f"🌐 **Тип:** `{json_note}`\n"
+        f"🌐 **Тип:** `{status_text}`\n"
         f"🔗 **Найдено ссылок:** `{len(links)}` шт.\n\n"
         f"🔗 **Линк:**\n`{sub_url}`\n\n"
-        f"⚠️ **P.S.** Используйте [конвертер]({CONVERTER_URL}) или скачайте файл."
+        f"⚠️ **P.S.** Используйте [конвертер]({CONVERTER_URL}), если формат не подошел."
     )
     
     kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("📥 Скачать контент", callback_data="get_all"))
-    kb.add(types.InlineKeyboardButton("🔄 Повторить через API", callback_data="force_api"))
+    kb.add(types.InlineKeyboardButton("📥 Скачать файл", callback_data="get_all"))
+    kb.add(types.InlineKeyboardButton("🔄 Через API", callback_data="force_api"))
     
     bot.edit_message_text(report, chat_id, message_id, parse_mode='Markdown', reply_markup=kb, disable_web_page_preview=True)
 
