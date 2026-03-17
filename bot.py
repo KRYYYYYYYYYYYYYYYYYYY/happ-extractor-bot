@@ -51,46 +51,61 @@ def handle_message(m):
     status_msg = bot.reply_to(m, "⏳ *Расшифровываю...*", parse_mode='Markdown')
     decrypted_data = decrypt_via_api(happ_link)
     
-    if decrypted_data and '://' in decrypted_data:
-        configs = [line.strip() for line in decrypted_data.split('\n') if '://' in line]
-        user_storage[m.chat.id] = configs # Храним как список
+    if decrypted_data:
+        # 1. Ссылка на подписку (то, что мы получили от API)
+        subscription_link = decrypted_data.strip()
         
+        # 2. Идем по ссылке подписки, чтобы узнать, что ВНУТРИ (кол-во серверов)
+        try:
+            # Пытаемся скачать содержимое подписки для анализа
+            sub_res = requests.get(subscription_link, timeout=10)
+            internal_content = sub_res.text
+            # Если там Base64 (часто бывает), пробуем декодировать для статистики
+            import base64
+            try:
+                internal_content = base64.b64decode(internal_content).decode('utf-8')
+            except: pass
+            
+            configs = [line.strip() for line in internal_content.split('\n') if '://' in line]
+        except:
+            configs = []
+
+        user_storage[m.chat.id] = configs # Сохраняем список серверов
+        
+        # Считаем протоколы внутри
         stats = {}
         for c in configs:
             proto = c.split('://')[0].upper()
             stats[proto] = stats.get(proto, 0) + 1
         
-        stats_info = "\n".join([f"🔹 {k}: `{v}`" for k, v in stats.items()])
-        report = f"✅ **Готово!**\n\n📊 Найдено: `{len(configs)}` конфигов\n{stats_info}"
+        stats_info = "\n".join([f"🔹 {k}: `{v}`" for k, v in stats.items()]) if stats else "🔹 Протоколы: `Не удалось определить`"
+        
+        # ФОРМИРУЕМ СООБЩЕНИЕ
+        report = (
+            f"✅ **Готово!**\n\n"
+            f"🔗 **Ссылка на подписку:**\n"
+            f"```\n{subscription_link}\n```\n" # Ссылка, которую удобно скопировать
+            f"📊 **Внутри найдено серверов:** `{len(configs)}`\n"
+            f"{stats_info}"
+        )
         
         kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton("⚙️ Дополнительно", callback_data="menu_extra"))
+        if configs:
+            kb.add(types.InlineKeyboardButton("✂️ Конфиги по отдельности", callback_data="get_sep"))
+            kb.add(types.InlineKeyboardButton("📦 All Configs (одним файлом)", callback_data="get_all"))
         
         bot.edit_message_text(report, m.chat.id, status_msg.message_id, parse_mode='Markdown', reply_markup=kb)
     else:
-        bot.edit_message_text("❌ Ошибка дешифровки.", m.chat.id, status_msg.message_id)
+        bot.edit_message_text("❌ Ошибка дешифровки через Sayori API.", m.chat.id, status_msg.message_id)
 
-@bot.callback_query_handler(func=lambda c: c.data == "menu_extra")
-def menu_extra(call):
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("✂️ По отдельности", callback_data="get_sep"))
-    kb.add(types.InlineKeyboardButton("📦 All Config (одним файлом/блоком)", callback_data="get_all"))
-    kb.add(types.InlineKeyboardButton("⬅️ Назад", callback_data="menu_back"))
-    bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=kb)
-
+# Обработчики кнопок (остаются такими же, как в прошлом шаге)
 @bot.callback_query_handler(func=lambda c: c.data == "get_sep")
 def get_sep(call):
     configs = user_storage.get(call.message.chat.id)
     if not configs: return
-    
-    # Выводим первые 10-15 для примера, чтобы не спамить
-    text = "📝 **Конфиги по отдельности:**\n\n"
-    for c in configs[:20]: # Ограничим 20 штуками в одном сообщении для чистоты
+    text = "📝 **Конфиги по отдельности (первые 20):**\n\n"
+    for c in configs[:20]:
         text += f"```\n{c}\n```\n"
-    
-    if len(configs) > 20:
-        text += f"\n_...и еще {len(configs)-20} конфигов. Для полного списка используй 'All Config'_"
-        
     bot.send_message(call.message.chat.id, text, parse_mode='Markdown')
     bot.answer_callback_query(call.id)
 
@@ -98,29 +113,12 @@ def get_sep(call):
 def get_all(call):
     configs = user_storage.get(call.message.chat.id)
     if not configs: return
-    
     full_text = "\n".join(configs)
-    
-    if len(full_text) < 3800:
-        bot.send_message(call.message.chat.id, f"```\n{full_text}\n```", parse_mode='Markdown')
-    else:
-        # Решаем проблему лимитов через файл
-        file_path = f"configs_{call.message.chat.id}.txt"
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(full_text)
-        
-        with open(file_path, "rb") as f:
-            bot.send_document(call.message.chat.id, f, caption="📂 Все конфиги в одном файле. Его можно импортировать в V2Ray/Nekobox.")
-        os.remove(file_path) # Удаляем временный файл
-        
-    bot.answer_callback_query(call.id)
-
-@bot.callback_query_handler(func=lambda c: c.data == "menu_back")
-def menu_back(call):
-    # Тут можно вернуть старую клавиатуру с кнопкой "Дополнительно"
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("⚙️ Дополнительно", callback_data="menu_extra"))
-    bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=kb)
+    file_path = f"configs_{call.message.chat.id}.txt"
+    with open(file_path, "w", encoding="utf-8") as f: f.write(full_text)
+    with open(file_path, "rb") as f:
+        bot.send_document(call.message.chat.id, f, caption="📂 Все конфиги одним файлом")
+    os.remove(file_path)
     bot.answer_callback_query(call.id)
 
 bot.polling()
