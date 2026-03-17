@@ -4,6 +4,7 @@ import requests
 import re
 import base64
 import random
+import time
 from urllib.parse import unquote
 from telebot import types
 
@@ -13,12 +14,10 @@ SAYORI_KEY = os.getenv('SAYORI_KEY')
 bot = telebot.TeleBot(TOKEN)
 user_storage = {}
 
-# Список агентов для обхода блокировок
 USER_AGENTS = [
     'v2rayNG/1.8.5 (com.v2ray.ang; build 100805; Android 13)',
     'NekoBox/1.3.1 (com.matsuri.nekobox; build 10301; Android 12)',
-    'Happ/2.1.0 (com.happ.network; build 2100; iOS 16.1)',
-    'ClashForAndroid/2.5.12 (com.github.kr328.clash; build 20512; Android 14)'
+    'Happ/2.1.0 (com.happ.network; build 2100; iOS 16.1)'
 ]
 
 def decrypt_via_api(happ_link):
@@ -63,37 +62,46 @@ def handle_message(m):
     
     if decrypted_url:
         sub_link = decrypted_url.strip()
-        internal_content = ""
-        data_type = "Не определено"
+        time.sleep(1) # Небольшая пауза перед запросом к серверу подписки
+        
+        content = ""
+        data_type = "Не удалось получить данные"
         configs = []
 
         try:
-            # Используем случайный User-Agent для каждого запроса
-            sub_headers = {'User-Agent': random.choice(USER_AGENTS), 'Accept': '*/*'}
-            sub_res = requests.get(sub_link, headers=sub_headers, timeout=12)
+            sub_headers = {
+                'User-Agent': random.choice(USER_AGENTS),
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                'Accept-Language': 'ru-RU,ru;q=0.8,en-US;q=0.5,en;q=0.3',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Cache-Control': 'max-age=0'
+            }
+            sub_res = requests.get(sub_link, headers=sub_headers, timeout=15)
             
-            if sub_res.status_code == 200:
-                raw_content = sub_res.text.strip()
-                # Пытаемся декодировать Base64
+            if sub_res.status_code == 200 and sub_res.text.strip():
+                raw = sub_res.text.strip()
+                # Декодируем Base64
                 try:
-                    missing_padding = len(raw_content) % 4
-                    if missing_padding: raw_content += '=' * (4 - missing_padding)
-                    internal_content = base64.b64decode(raw_content).decode('utf-8', errors='ignore')
+                    missing_padding = len(raw) % 4
+                    if missing_padding: raw += '=' * (4 - missing_padding)
+                    content = base64.b64decode(raw).decode('utf-8', errors='ignore')
                 except:
-                    internal_content = raw_content
+                    content = raw
                 
-                # Определяем, что внутри: JSON или ссылки
-                if internal_content.strip().startswith('{') or internal_content.strip().startswith('['):
+                if content.strip().startswith('{') or content.strip().startswith('['):
                     data_type = "📦 JSON-конфигурация"
-                    configs = [internal_content] # Считаем за 1 большой конфиг
+                    configs = [content]
                 else:
                     data_type = "🔗 Список ссылок (vless/vmess/...)"
-                    configs = [line.strip() for line in internal_content.split('\n') if '://' in line]
-        except: pass
+                    configs = [line.strip() for line in content.split('\n') if '://' in line]
+            else:
+                data_type = f"⚠️ Ошибка сервера: {sub_res.status_code}"
+        except Exception as e:
+            data_type = f"❌ Ошибка запроса: {str(e)[:50]}"
 
-        user_storage[m.chat.id] = internal_content # Сохраняем весь текст
+        user_storage[m.chat.id] = content
 
-        # Формируем отчет
         stats_info = ""
         if data_type == "🔗 Список ссылок (vless/vmess/...)":
             stats = {}
@@ -103,8 +111,8 @@ def handle_message(m):
             stats_info = "\n".join([f"🔹 {k}: `{v}`" for k, v in stats.items()])
             count_info = f"📊 Внутри найдено серверов: `{len(configs)}`"
         else:
-            # Для JSON просто показываем размер
-            count_info = f"📊 Размер файла: `{len(internal_content) // 1024} KB`"
+            size_kb = len(content.encode('utf-8')) / 1024 if content else 0
+            count_info = f"📊 Размер контента: `{size_kb:.2f} KB`"
 
         report = (
             f"✅ **Готово!**\n\n"
@@ -116,34 +124,35 @@ def handle_message(m):
         )
         
         kb = types.InlineKeyboardMarkup()
-        if internal_content:
+        if content:
             kb.add(types.InlineKeyboardButton("📥 Скачать All Config", callback_data="get_all"))
         
         bot.edit_message_text(report, m.chat.id, status_msg.message_id, parse_mode='Markdown', reply_markup=kb)
     else:
-        bot.edit_message_text("❌ Ошибка дешифровки через API.", m.chat.id, status_msg.message_id)
+        bot.edit_message_text("❌ Ошибка Sayori API (неверная ссылка?).", m.chat.id, status_msg.message_id)
 
 @bot.callback_query_handler(func=lambda c: c.data == "get_all")
 def get_all(call):
     content = user_storage.get(call.message.chat.id)
     if not content:
-        bot.answer_callback_query(call.id, "Данные не найдены.")
+        bot.answer_callback_query(call.id, "Данные пусты.")
         return
     
-    # Если это список ссылок, добавим пустые строки для красоты копирования
-    if not (content.strip().startswith('{') or content.strip().startswith('[')):
-        lines = [line.strip() for line in content.split('\n') if line.strip()]
+    is_json = content.strip().startswith('{') or content.strip().startswith('[')
+    
+    if not is_json:
+        lines = [l.strip() for l in content.split('\n') if l.strip()]
         content = "\n\n".join(lines)
 
-    # Если текст короткий — шлем в чат, если длинный — файлом
-    if len(content) < 3900:
+    if 0 < len(content) < 3500:
         bot.send_message(call.message.chat.id, f"```\n{content}\n```", parse_mode='Markdown')
     else:
-        file_path = f"config_{call.message.chat.id}.txt"
+        ext = "json" if is_json else "txt"
+        file_path = f"config_{call.message.chat.id}.{ext}"
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(content)
         with open(file_path, "rb") as f:
-            bot.send_document(call.message.chat.id, f, caption="📂 Твой полный конфиг")
+            bot.send_document(call.message.chat.id, f, caption=f"📂 Твой конфиг (.{ext})")
         if os.path.exists(file_path): os.remove(file_path)
     
     bot.answer_callback_query(call.id)
