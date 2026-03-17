@@ -22,17 +22,14 @@ USER_AGENTS = [
 ]
 
 def split_json_objects(text):
-    """Разделяет склеенные JSON-объекты и проверяет их валидность."""
+    """Находит JSON объекты в тексте."""
+    if not text or '{' not in text: return []
     objs = []
-    # Ищем потенциальные границы объектов {...}
-    # Используем простой счетчик скобок для надежности при склейке
     bracket_count = 0
     start_index = -1
-    
     for i, char in enumerate(text):
         if char == '{':
-            if bracket_count == 0:
-                start_index = i
+            if bracket_count == 0: start_index = i
             bracket_count += 1
         elif char == '}':
             bracket_count -= 1
@@ -41,8 +38,7 @@ def split_json_objects(text):
                 try:
                     json.loads(obj_candidate)
                     objs.append(obj_candidate)
-                except:
-                    pass
+                except: pass
                 start_index = -1
     return objs
 
@@ -52,11 +48,8 @@ def decrypt_via_api(happ_link):
     payload = {"link": happ_link}
     try:
         res = requests.post(api_url, json=payload, headers=headers, timeout=15)
-        if res.status_code == 200:
-            data = res.json()
-            return data.get("result") if data.get("success") else None
-    except: pass
-    return None
+        return res.json().get("result") if res.status_code == 200 else None
+    except: return None
 
 def extract_happ_raw(url):
     headers = {'User-Agent': random.choice(USER_AGENTS)}
@@ -66,10 +59,6 @@ def extract_happ_raw(url):
             m = re.search(r'happ://crypt\d/[^"\'\s<>]+', url_dec)
             if m: return m.group(0)
         res = requests.get(url, headers=headers, timeout=10)
-        final_url = unquote(res.url)
-        if 'happ://' in final_url:
-            m = re.search(r'happ://crypt\d/[^"\'\s<>]+', final_url)
-            if m: return m.group(0)
         m = re.search(r'happ://crypt\d/[^"\'\s<>]+', res.text)
         return m.group(0) if m else None
     except: return None
@@ -83,65 +72,58 @@ def handle_message(m):
         bot.reply_to(m, "❌ Ссылка не найдена.")
         return
 
-    status_msg = bot.reply_to(m, "⏳ *Обработка подписки...*", parse_mode='Markdown')
+    status_msg = bot.reply_to(m, "⏳ *Стучусь в подписку...*", parse_mode='Markdown')
     decrypted_url = decrypt_via_api(happ_link)
     
     if decrypted_url:
         sub_link = decrypted_url.strip()
-        time.sleep(1)
-        
         content = ""
-        found_jsons = []
-        found_links = []
+        error_info = ""
 
         try:
+            # Упрощенные заголовки, чтобы не ловить 500 ошибку
             sub_headers = {
                 'User-Agent': random.choice(USER_AGENTS),
-                'Accept': '*/*',
-                'Connection': 'keep-alive',
+                'Accept': '*/*'
             }
+            time.sleep(1) 
             sub_res = requests.get(sub_link, headers=sub_headers, timeout=15)
             
-            if sub_res.status_code == 200 and sub_res.text.strip():
+            if sub_res.status_code == 200:
                 raw = sub_res.text.strip()
                 try:
+                    # Попытка Base64
                     pad = len(raw) % 4
                     if pad: raw += '=' * (4 - pad)
                     content = base64.b64decode(raw).decode('utf-8', errors='ignore')
                 except:
                     content = raw
-                
-                # Поиск JSON-объектов
-                found_jsons = split_json_objects(content)
-                # Поиск классических ссылок
-                found_links = [line.strip() for line in content.split('\n') if '://' in line and not line.strip().startswith('{')]
-                
             else:
-                content = f"⚠️ Ошибка сервера: {sub_res.status_code}"
+                error_info = f"⚠️ Ошибка сервера: {sub_res.status_code}"
         except Exception as e:
-            content = f"❌ Ошибка запроса: {str(e)[:50]}"
+            error_info = f"❌ Ошибка: {str(e)[:30]}"
+
+        if error_info:
+            bot.edit_message_text(f"❌ Не удалось загрузить данные.\n{error_info}", m.chat.id, status_msg.message_id)
+            return
 
         user_storage[m.chat.id] = content
+        
+        # Анализ
+        jsons = split_json_objects(content)
+        links = [l.strip() for l in content.split('\n') if '://' in l and not l.strip().startswith('{')]
+        
+        stats = {}
+        for l in links:
+            proto = l.split('://')[0].upper()
+            stats[proto] = stats.get(proto, 0) + 1
+        stats_info = "\n".join([f"🔹 {k}: `{v}`" for k, v in stats.items()])
 
-        # Формируем статистику
-        stats_info = ""
-        if found_links:
-            stats = {}
-            for c in found_links:
-                proto = c.split('://')[0].upper()
-                stats[proto] = stats.get(proto, 0) + 1
-            stats_info = "\n" + "\n".join([f"🔹 {k}: `{v}`" for k, v in stats.items()])
-        
-        # Плашка обнаружения
-        json_status = f"📦 JSON-конфиги: `{len(found_jsons)} шт.`" if found_jsons else "📦 JSON-конфиги: `0`"
-        links_status = f"🔗 Ссылки: `{len(found_links)} шт.`"
-        
         report = (
             f"✅ **Готово!**\n\n"
-            f"🔗 **Ссылка на подписку:**\n"
-            f"```\n{sub_link}\n```\n"
-            f"{links_status}\n"
-            f"{json_status}\n"
+            f"🔗 **Ссылка:**\n`{sub_link}`\n\n"
+            f"🔗 Ссылки: `{len(links)} шт.`\n"
+            f"📦 JSON-конфиги: `{len(jsons)} шт.`\n"
             f"{stats_info}"
         )
         
@@ -151,28 +133,22 @@ def handle_message(m):
         
         bot.edit_message_text(report, m.chat.id, status_msg.message_id, parse_mode='Markdown', reply_markup=kb)
     else:
-        bot.edit_message_text("❌ Ошибка Sayori API.", m.chat.id, status_msg.message_id)
+        bot.edit_message_text("❌ Ошибка расшифровки.", m.chat.id, status_msg.message_id)
 
 @bot.callback_query_handler(func=lambda c: c.data == "get_all")
 def get_all(call):
     content = user_storage.get(call.message.chat.id)
-    if not content:
-        bot.answer_callback_query(call.id, "Данные пусты.")
-        return
+    if not content: return
     
-    is_json = content.strip().startswith('{') or content.strip().startswith('[')
-    
-    if len(content) < 3500:
+    is_json = content.strip().startswith('{')
+    if len(content) < 3000:
         bot.send_message(call.message.chat.id, f"```\n{content}\n```", parse_mode='Markdown')
     else:
-        ext = "json" if is_json else "txt"
-        file_path = f"config_{call.message.chat.id}.{ext}"
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(content)
+        file_path = f"sub_{call.message.chat.id}.{'json' if is_json else 'txt'}"
+        with open(file_path, "w", encoding="utf-8") as f: f.write(content)
         with open(file_path, "rb") as f:
-            bot.send_document(call.message.chat.id, f, caption=f"📂 Твой конфиг (.{ext})")
+            bot.send_document(call.message.chat.id, f)
         if os.path.exists(file_path): os.remove(file_path)
-    
     bot.answer_callback_query(call.id)
 
 bot.polling()
