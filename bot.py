@@ -43,62 +43,77 @@ def split_json_objects(text):
     return objs
 
 def extract_links_from_json(json_text):
-    """Парсит JSON и конвертирует outbounds в vless:// или ss:// ссылки."""
     links = []
     try:
         data = json.loads(json_text)
-        # Если это конфиг типа "автовыбор", ищем внутри outbounds
+        # Ищем везде: в outbounds и просто в корне (на случай если это одиночный конфиг)
         outbounds = data.get("outbounds", [])
-        
-        # Если outbounds пуст, возможно это просто одиночный объект сервера
         if not outbounds and data.get("protocol"):
             outbounds = [data]
 
         for out in outbounds:
             protocol = out.get("protocol")
+            # Пропускаем технические протоколы, которые не являются серверами
+            if protocol not in ["vless", "vmess", "shadowsocks", "trojan"]:
+                continue
+                
             tag = out.get("tag", "node").replace(" ", "_")
             
-            if protocol == "vless":
-                try:
-                    vnext = out["settings"]["vnext"][0]
-                    user = vnext["users"][0]
-                    addr = vnext["address"]
-                    port = vnext["port"]
-                    uuid = user["id"]
-                    flow = user.get("flow", "")
-                    
-                    ss = out.get("streamSettings", {})
-                    net = ss.get("network", "tcp")
-                    sec = ss.get("security", "none")
-                    
-                    params = [f"type={net}", f"security={sec}"]
-                    if flow: params.append(f"flow={flow}")
-                    
-                    if sec == "reality":
-                        r_settings = ss.get("realitySettings", {})
-                        params.append(f"sni={r_settings.get('serverName', '')}")
-                        params.append(f"pbk={r_settings.get('publicKey', '')}")
-                        params.append(f"sid={r_settings.get('shortId', '')}")
-                        params.append(f"fp={r_settings.get('fingerprint', 'chrome')}")
-                    
-                    if net == "ws":
-                        ws_settings = ss.get("wsSettings", {})
-                        params.append(f"path={ws_settings.get('path', '/')}")
-                        params.append(f"host={ws_settings.get('headers', {}).get('Host', '')}")
-                    elif net == "grpc":
-                        g_settings = ss.get("grpcSettings", {})
-                        params.append(f"serviceName={g_settings.get('serviceName', '')}")
+            try:
+                # Пытаемся достать основные данные сервера
+                settings = out.get("settings", {})
+                vnext = settings.get("vnext", [])
+                
+                # Если vnext пуст (как в балансировщиках), пропускаем этот блок
+                if not vnext:
+                    continue
+                
+                server_info = vnext[0]
+                user = server_info.get("users", [{}])[0]
+                addr = server_info.get("address")
+                port = server_info.get("port")
+                uuid = user.get("id")
+                
+                if not all([addr, port, uuid]): # Если критических данных нет - в топку
+                    continue
 
-                    query = "&".join(params)
-                    links.append(f"vless://{uuid}@{addr}:{port}?{query}#{tag}")
-                except: continue
+                # Сбор параметров транспорта
+                ss = out.get("streamSettings", {})
+                net = ss.get("network", "tcp")
+                sec = ss.get("security", "none")
+                
+                params = [f"type={net}", f"security={sec}"]
+                
+                # Добавляем Flow (для Vision)
+                if user.get("flow"): params.append(f"flow={user['flow']}")
 
-            elif protocol == "shadowsocks":
-                try:
-                    server = out["settings"]["servers"][0]
-                    user_data = base64.b64encode(f"{server['method']}:{server['password']}".encode()).decode()
-                    links.append(f"ss://{user_data}@{server['address']}:{server['port']}#{tag}")
-                except: continue
+                # Reality
+                if sec == "reality":
+                    r = ss.get("realitySettings", {})
+                    params.append(f"sni={r.get('serverName', '')}")
+                    params.append(f"pbk={r.get('publicKey', '')}")
+                    params.append(f"sid={r.get('shortId', '')}")
+                    params.append(f"fp={r.get('fingerprint', 'chrome')}")
+                
+                # TLS/XTLS
+                elif sec in ["tls", "xtls"]:
+                    t = ss.get("tlsSettings", {}) or ss.get("xtlsSettings", {})
+                    params.append(f"sni={t.get('serverName', '')}")
+
+                # WebSocket / gRPC
+                if net == "ws":
+                    ws = ss.get("wsSettings", {})
+                    params.append(f"path={ws.get('path', '/')}")
+                    params.append(f"host={ws.get('headers', {}).get('Host', '')}")
+                elif net == "grpc":
+                    params.append(f"serviceName={ss.get('grpcSettings', {}).get('serviceName', '')}")
+
+                query = "&".join(params)
+                links.append(f"{protocol}://{uuid}@{addr}:{port}?{query}#{tag}")
+                
+            except Exception as e:
+                print(f"Ошибка парсинга блока: {e}")
+                continue
                 
     except: pass
     return links
