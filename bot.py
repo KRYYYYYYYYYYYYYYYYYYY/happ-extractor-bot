@@ -50,26 +50,28 @@ def extract_happ_anywhere(text_or_url):
     """Ищет happ:// или вытягивает URL из метаданных страницы"""
     decoded_raw = unquote(text_or_url)
     
-    # 1. Если happ:// уже в тексте
+    # --- НОВОЕ: Обработка happ://add/https://... ---
+    if 'happ://add/' in decoded_raw:
+        new_url = decoded_raw.split('happ://add/')[-1]
+        if new_url.startswith('http'):
+            return new_url
+
+    # 1. Если happ://crypt уже в тексте
     match = re.search(r'happ://crypt\d/[^\s"\'<>]+', decoded_raw)
     if match: return match.group(0)
     
     if text_or_url.startswith('http'):
         try:
             h = {'User-Agent': random.choice(USER_AGENTS)}
-            # ВАЖНО: allow_redirects=False, чтобы не упасть на нестандартном протоколе
             r = requests.get(text_or_url, headers=h, timeout=10, allow_redirects=False)
             
-            # Проверяем заголовки редиректа (для ecobuy)
             loc = r.headers.get('Location', '')
             if 'happ://' in unquote(loc):
                 return unquote(loc)
 
-            # Проверка на Атланту в теле страницы
             atlanta_sub = extract_from_atlanta_meta(r.text)
             if atlanta_sub: return atlanta_sub
             
-            # Поиск happ:// в коде страницы
             match = re.search(r'happ://crypt\d/[^\s"\'<>]+', r.text)
             if match: return match.group(0)
         except: pass
@@ -81,7 +83,6 @@ def handle_message(m):
     target_link = extract_happ_anywhere(text)
     
     if not target_link:
-        # Если это просто прямая ссылка на raw github или файл, пробуем её
         if text.startswith('http'): target_link = text
         else:
             bot.reply_to(m, "❌ Ссылка не распознана.")
@@ -89,7 +90,8 @@ def handle_message(m):
 
     status_msg = bot.reply_to(m, "⏳ *Обработка...*", parse_mode='Markdown')
     
-    if target_link.startswith('happ://'):
+    # В API шлем только зашифрованные happ://crypt
+    if target_link.startswith('happ://crypt'):
         decrypted = decrypt_via_api(target_link)
         final_url = decrypted if decrypted else target_link
     else:
@@ -107,14 +109,12 @@ def fetch_and_report(chat_id, sub_url, message_id):
             'Accept-Encoding': 'gzip, deflate', 
             'Connection': 'keep-alive'
         }
-        # Для скачивания финального контента редиректы разрешаем
         res = requests.get(sub_url, headers=headers, timeout=15, allow_redirects=True)
         error_code = res.status_code
         
         if res.status_code == 200:
             content = res.content.decode('utf-8', errors='ignore').strip()
             
-            # Если это Base64 (старые подписки)
             if "://" not in content[:500] and "{" not in content[:100] and not content.startswith("#"):
                 try:
                     clean_raw = re.sub(r'[^a-zA-Z0-9+/=]', '', content)
@@ -135,7 +135,6 @@ def fetch_and_report(chat_id, sub_url, message_id):
     user_storage[chat_id] = content
     links = re.findall(r'(?:vless|vmess|ss|trojan|shadowsocks|tuic|hysteria2?)://[^\r\n"\'<>]+', content)
     
-    # ПРОВЕРКА ТИПА: Атланта или JSON
     is_atlanta = "atlanta-subs" in sub_url
     has_json_struct = '"outbounds"' in content or '"nodes"' in content
     
