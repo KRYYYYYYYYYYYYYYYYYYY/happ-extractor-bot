@@ -1,11 +1,11 @@
 name: Run Happ Extractor Bot
 
 on:
-  workflow_dispatch: # Запуск кнопкой вручную
+  workflow_dispatch:
   schedule:
-    - cron: '0 */5 * * *' # Перезапуск каждые 5 часов
+    - cron: '0 */5 * * *'
   push:
-    branches: [ main ] # Запуск при обновлении кода или загрузке дешифратора
+    branches: [ main ]
 
 jobs:
   run-bot:
@@ -14,17 +14,25 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+
+      - name: Build Decoder
+        # Эта строчка сама создаст правильный файл 'decoder' из твоего main.go
+        run: go build -o decoder main.go
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
 
       - name: Install dependencies
-        run: |
-          pip install pyTelegramBotAPI requests
+        run: pip install pyTelegramBotAPI requests
 
-      - name: Set permissions for decoder
-        run: chmod +x decoder # ДАЕМ ПРАВА НА ЗАПУСК БИНАРНИКА
+      - name: Set permissions
+        run: chmod +x decoder
 
       - name: Run Bot
         env:
