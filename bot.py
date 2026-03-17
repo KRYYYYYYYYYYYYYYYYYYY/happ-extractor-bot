@@ -155,19 +155,39 @@ def handle_message(m):
         sub_link = decrypted_url.strip()
         content = ""
         try:
-            sub_res = requests.get(sub_link, headers={'User-Agent': random.choice(USER_AGENTS)}, timeout=15)
+            # Имитируем запрос от v2rayNG максимально точно
+            sub_headers = {
+                'User-Agent': random.choice(USER_AGENTS),
+                'Accept': '*/*',
+                'Connection': 'keep-alive',
+                'Accept-Language': 'en-US,en;q=0.9',
+            }
+            
+            # Небольшая пауза, чтобы сервер не принял нас за спам-бота
+            time.sleep(random.uniform(1.0, 2.5)) 
+            
+            # Делаем запрос
+            sub_res = requests.get(sub_link, headers=sub_headers, timeout=20, verify=True)
+            
             if sub_res.status_code == 200:
                 raw = sub_res.text.strip()
+                # Пытаемся понять, это Base64 или чистый текст/JSON
                 try:
-                    pad = len(raw) % 4
-                    if pad: raw += '=' * (4 - pad)
-                    content = base64.b64decode(raw).decode('utf-8', errors='ignore')
-                except: content = raw
+                    # Убираем возможные невидимые символы, которые мешают Base64
+                    clean_raw = re.sub(r'[^a-zA-Z0-9+/=]', '', raw)
+                    pad = len(clean_raw) % 4
+                    if pad: clean_raw += '=' * (4 - pad)
+                    content = base64.b64decode(clean_raw).decode('utf-8', errors='ignore')
+                except:
+                    content = raw
+            elif sub_res.status_code == 500:
+                bot.edit_message_text("⚠️ Сервер подписки выдал ошибку 500. Возможно, стоит попробовать позже или сменить IP бота.", m.chat.id, status_msg.message_id)
+                return
             else:
                 bot.edit_message_text(f"❌ Ошибка сервера: {sub_res.status_code}", m.chat.id, status_msg.message_id)
                 return
         except Exception as e:
-            bot.edit_message_text(f"❌ Ошибка: {str(e)[:30]}", m.chat.id, status_msg.message_id)
+            bot.edit_message_text(f"❌ Сетевая ошибка: {str(e)[:40]}", m.chat.id, status_msg.message_id)
             return
 
         all_links = []
