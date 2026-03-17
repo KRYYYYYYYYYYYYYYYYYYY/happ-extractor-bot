@@ -5,34 +5,44 @@ import re
 from urllib.parse import unquote
 from telebot import types
 
+# Берем токены из секретов GitHub
 TOKEN = os.getenv('TELEGRAM_TOKEN')
-bot = telebot.TeleBot(TOKEN)
+SAYORI_KEY = os.getenv('SAYORI_KEY') # Твой новый API ключ
 
+bot = telebot.TeleBot(TOKEN)
 user_storage = {}
 
 def decrypt_via_api(happ_link):
-    """Отправляет ссылку на API Sayori для дешифровки"""
+    """Отправляет ссылку на API Sayori с использованием ключа авторизации"""
     api_url = "https://happ.sayori.cc/api/key"
     try:
-        # Отправляем POST запрос с ссылкой
-        response = requests.post(api_url, data={'key': happ_link}, timeout=15)
+        # Формируем запрос согласно документации Sayori
+        payload = {
+            'key': happ_link,
+            'api_key': SAYORI_KEY  # Передаем твой ключ
+        }
+        response = requests.post(api_url, data=payload, timeout=15)
+        
         if response.status_code == 200:
             return response.text.strip()
+        elif response.status_code == 401:
+            return "Ошибка: Неверный API ключ Sayori. Проверь секреты GitHub."
         else:
-            return f"Ошибка API: Код {response.status_code}. Возможно, ссылка невалидна."
+            return f"Ошибка API: Код {response.status_code}. {response.text[:100]}"
     except Exception as e:
         return f"Ошибка подключения к API: {e}"
 
 def extract_happ_raw(url):
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
     try:
-        url = unquote(url)
-        if 'happ://' in url:
-            return re.split(r'["\'\s<>]', url[url.find('happ://'):])[0]
-        
+        url_decoded = unquote(url)
+        if 'happ://' in url_decoded:
+            match = re.search(r'happ://crypt\d/[^"\'\s<>]+', url_decoded)
+            if match: return match.group(0)
+            
         res = requests.get(url, headers=headers, timeout=10)
-        raw_match = re.search(r'happ://crypt\d/[^"\'\s<>]+', res.text)
-        return raw_match.group(0) if raw_match else None
+        match = re.search(r'happ://crypt\d/[^"\'\s<>]+', res.text)
+        return match.group(0) if match else None
     except:
         return None
 
@@ -50,42 +60,41 @@ def handle_message(m):
     happ_link = text if text.startswith('happ://') else extract_happ_raw(text)
     
     if not happ_link:
-        bot.reply_to(m, "❌ Ссылка не найдена в сообщении.")
+        bot.reply_to(m, "❌ Ссылка не найдена. Пришли URL страницы или happ:// ссылку.")
         return
 
     bot.send_chat_action(m.chat.id, 'typing')
     
-    # Используем API вместо локального дешифратора
+    # Отправляем на расшифровку с твоим ключом
     decrypted_data = decrypt_via_api(happ_link)
     
     if '://' in decrypted_data:
         total, stats, content = analyze_configs(decrypted_data)
         user_storage[m.chat.id] = content
         
-        # Красивый вывод типов
         stats_info = "\n".join([f"🔹 {k}: `{v}`" for k, v in stats.items()])
         report = (
-            f"✅ **Успешно расшифровано через API!**\n\n"
+            f"✅ **Расшифровано через Sayori API!**\n\n"
             f"📊 Всего конфигов: `{total}`\n"
             f"{stats_info}"
         )
         
         kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton("📥 Получить все конфиги", callback_data="get_data"))
+        kb.add(types.InlineKeyboardButton("📥 Показать конфиги", callback_data="get_data"))
         bot.send_message(m.chat.id, report, parse_mode='Markdown', reply_markup=kb)
     else:
-        bot.reply_to(m, f"❌ API не смогло расшифровать это:\n`{decrypted_data}`", parse_mode='Markdown')
+        bot.reply_to(m, f"❌ Не удалось расшифровать:\n`{decrypted_data}`")
 
 @bot.callback_query_handler(func=lambda c: c.data == "get_data")
 def send_data(call):
     data = user_storage.get(call.message.chat.id)
     if data:
-        if len(data) < 3500:
+        if len(data) < 3800:
             bot.send_message(call.message.chat.id, f"```\n{data}\n```", parse_mode='Markdown')
         else:
             with open("out.txt", "w", encoding="utf-8") as f: f.write(data)
             bot.send_document(call.message.chat.id, open("out.txt", "rb"), caption="Твои конфиги")
     else:
-        bot.answer_callback_query(call.id, "Данные устарели.")
+        bot.answer_callback_query(call.id, "Данные устарели, отправь ссылку заново.")
 
 bot.polling()
