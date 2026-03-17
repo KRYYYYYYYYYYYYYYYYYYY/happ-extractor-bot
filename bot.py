@@ -97,61 +97,59 @@ def fetch_and_report(chat_id, sub_url, message_id):
     try:
         headers = {
             'User-Agent': random.choice(USER_AGENTS),
-            'Accept-Encoding': 'gzip, deflate',  # Явно говорим, что понимаем сжатие
+            'Accept-Encoding': 'gzip, deflate, br',
         }
-        # Делаем запрос
         res = requests.get(sub_url, headers=headers, timeout=15)
         error_code = res.status_code
         
         if res.status_code == 200:
-            # res.text может тупить со сжатием, используем автоматический декодер
-            res.encoding = res.apparent_encoding
-            raw = res.text.strip()
-            
-            # Если в начале всё равно "мусор", пробуем принудительно прочитать через content
-            if len(raw) > 0 and (ord(raw[0]) < 32 and raw[0] not in '\n\r\t'):
-                raw = res.content.decode('utf-8', errors='ignore').strip()
+            # Декодируем аккуратно, игнорируя бинарные артефакты gzip
+            content = res.content.decode('utf-8', errors='ignore').strip()
 
-            # Проверка на Base64
-            try:
-                clean_raw = re.sub(r'[^a-zA-Z0-9+/=]', '', raw)
-                if len(clean_raw) > 30:
-                    decoded = base64.b64decode(clean_raw).decode('utf-8', errors='ignore')
-                    content = decoded if '://' in decoded or '{' in decoded else raw
-                else: content = raw
-            except: content = raw
-    except Exception as e: error_code = str(e)[:20]
+            # Если контент похож на чистый Base64 (без протоколов и решеток)
+            if "://" not in content and not content.startswith("#"):
+                try:
+                    clean_raw = re.sub(r'[^a-zA-Z0-9+/=]', '', content)
+                    if len(clean_raw) > 30:
+                        decoded = base64.b64decode(clean_raw).decode('utf-8', errors='ignore')
+                        if '://' in decoded or '{' in decoded:
+                            content = decoded
+                except: pass
+    except Exception as e:
+        error_code = str(e)[:20]
 
     if not content or (isinstance(error_code, int) and error_code >= 400):
         kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton("🔑 API принудительно", callback_data="force_api"))
-        bot.edit_message_text(f"❌ Ошибка: {error_code}", chat_id, message_id, reply_markup=kb)
+        kb.add(types.InlineKeyboardButton("🔑 Принудительно через API", callback_data="force_api"))
+        bot.edit_message_text(f"❌ Ошибка (Код: {error_code})", chat_id, message_id, reply_markup=kb)
         return
 
     user_storage[chat_id] = content
     
-    # Регулярка для поиска прокси-ссылок
-    links = re.findall(r'(vless|vmess|ss|trojan|shadowsocks|tuic|hysteria2?)://[^\s"\'<>]+', content)
+    # НОВАЯ РЕГУЛЯРКА: ищет протокол и забирает ВСЁ до конца строки
+    # Это позволит не ломать ссылки с пробелами и эмодзи в именах
+    links = re.findall(r'(?:vless|vmess|ss|trojan|shadowsocks|tuic|hysteria2?)://[^\r\n]+', content)
+    
     has_json = '"outbounds"' in content or ('{' in content and '"' in content)
     
     if links:
-        status_text = "ℹ️ Текстовая подписка" + (" (+ JSON)" if has_json else "")
+        json_note = "ℹ️ Текстовая подписка" + (" (+ JSON)" if has_json else "")
     elif has_json:
-        status_text = "✅ JSON Конфигурация"
+        json_note = "✅ Обнаружен JSON конфиг"
     else:
-        status_text = "📄 Текстовый файл"
+        json_note = "📄 Текстовый файл"
 
     report = (
         f"✅ **Готово!**\n\n"
-        f"🌐 **Тип:** `{status_text}`\n"
+        f"🌐 **Тип:** `{json_note}`\n"
         f"🔗 **Найдено ссылок:** `{len(links)}` шт.\n\n"
         f"🔗 **Линк:**\n`{sub_url}`\n\n"
-        f"⚠️ **P.S.** Используйте [конвертер]({CONVERTER_URL}), если формат не подошел."
+        f"⚠️ **P.S.** Используйте [конвертер]({CONVERTER_URL}) или скачайте файл."
     )
     
     kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("📥 Скачать файл", callback_data="get_all"))
-    kb.add(types.InlineKeyboardButton("🔄 Через API", callback_data="force_api"))
+    kb.add(types.InlineKeyboardButton("📥 Скачать контент", callback_data="get_all"))
+    kb.add(types.InlineKeyboardButton("🔄 Повторить через API", callback_data="force_api"))
     
     bot.edit_message_text(report, chat_id, message_id, parse_mode='Markdown', reply_markup=kb, disable_web_page_preview=True)
 
