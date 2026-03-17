@@ -16,12 +16,33 @@ user_storage = {}
 def extract_happ_raw(url):
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
     try:
+        # 1. Декодируем саму входящую ссылку (на случай, если happ:// зашито внутри как параметр)
+        decoded_url = unquote(url)
+        
+        # 2. Если в декодированном URL уже есть happ://, забираем его сразу
+        if 'happ://' in decoded_url:
+            # Ищем начало happ:// и берем всё до конца или до кавычки/пробела
+            start_index = decoded_url.find('happ://')
+            # Вырезаем кусок, убирая возможный мусор в конце
+            raw_from_url = re.split(r'["\'\s<>]', decoded_url[start_index:])[0]
+            return raw_from_url
+
+        # 3. Если в URL не нашли, идем на саму страницу
         response = requests.get(url, headers=headers, timeout=10)
-        if 'to=happ://' in response.url:
-            return unquote(response.url.split('to=')[1])
+        
+        # Проверяем финальный URL после всех редиректов (тоже декодируем)
+        final_url = unquote(response.url)
+        if 'happ://' in final_url:
+            start_index = final_url.find('happ://')
+            return re.split(r'["\'\s<>]', final_url[start_index:])[0]
+
+        # Ищем в HTML коде страницы
         html = response.text
         raw_match = re.search(r'happ://crypt\d/[^"\'\s<>]+', html)
-        return raw_match.group(0) if raw_match else None
+        if raw_match:
+            return raw_match.group(0)
+            
+        return None
     except Exception as e:
         return f"Ошибка при запросе: {e}"
 
