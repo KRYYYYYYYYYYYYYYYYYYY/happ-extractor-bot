@@ -37,17 +37,19 @@ def decrypt_link(happ_link):
         return f"Ошибка запуска: {e}"
 
 def analyze_configs(raw_text):
-    """Считает количество и типы конфигов"""
+    """Считает количество и все возможные типы конфигов"""
     lines = [line.strip() for line in raw_text.split('\n') if line.strip()]
-    stats = {"VLESS": 0, "VMESS": 0, "SS": 0, "Trojan": 0, "Other": 0}
+    # Словарь для сбора статистики
+    stats = {}
     
     for line in lines:
-        l = line.lower()
-        if l.startswith('vless://'): stats["VLESS"] += 1
-        elif l.startswith('vmess://'): stats["VMESS"] += 1
-        elif l.startswith('ss://'): stats["SS"] += 1
-        elif l.startswith('trojan://'): stats["Trojan"] += 1
-        else: stats["Other"] += 1
+        # Извлекаем название протокола до символов ://
+        protocol_match = re.match(r'^([a-zA-Z0-9]+)://', line.lower())
+        if protocol_match:
+            proto = protocol_match.group(1).upper() # Получаем например 'VLESS' или 'HY2'
+            stats[proto] = stats.get(proto, 0) + 1
+        else:
+            stats["UNKNOWN"] = stats.get("UNKNOWN", 0) + 1
     
     return len(lines), stats, lines
 
