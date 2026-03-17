@@ -4,8 +4,8 @@ import requests
 import re
 from urllib.parse import unquote
 
-# Вставь сюда свой токен от @BotFather
-TOKEN = os.getenv('TELEGRAM_TOKEN') # Берем токен из секретов GitHub
+# Берем токен из секретов GitHub (или Environment Variables на сервере)
+TOKEN = os.getenv('TELEGRAM_TOKEN')
 bot = telebot.TeleBot(TOKEN)
 
 def extract_happ_raw(url):
@@ -13,47 +13,56 @@ def extract_happ_raw(url):
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     }
     try:
-        # 1. Получаем HTML страницы
+        # Получаем содержимое страницы
         response = requests.get(url, headers=headers, timeout=10)
-        html = response.text
+        
+        # Если это прямая ссылка в параметрах редиректа
+        if 'to=happ://' in response.url:
+            return unquote(response.url.split('to=')[1])
 
-        # 2. Ищем переменную const RAW в скрипте
-        # Она может быть как в коде страницы, так и в URL (если это редирект)
-        raw_match = re.search(r'const RAW\s*=\s*"(happ://crypt\d/[^"]+)"', html)
+        html = response.text
+        # Ищем паттерн happ://crypt...
+        raw_match = re.search(r'happ://crypt\d/[^"\'\s<>]+', html)
         
         if raw_match:
-            return raw_match.group(1)
-        
-        # 3. Если в HTML нет, проверяем, не перекинуло ли нас в URL с параметром to=
-        if 'to=' in response.url:
-            encoded_part = response.url.split('to=')[1]
-            return unquote(encoded_part)
+            return raw_match.group(0)
 
         return None
     except Exception as e:
-        return f"Ошибка: {e}"
+        return f"Ошибка при запросе: {e}"
 
 @bot.message_handler(commands=['start'])
 def start(message):
-    bot.reply_to(message, "Пр!")
+    bot.reply_to(message, "Привет! Пришли мне ссылку от Happ (atlanta-subs и др.), а я вытащу из неё RAW-код для дешифратора.")
 
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
-    url = message.text.strip()
+    text = message.text.strip()
     
-    # Проверка, что это ссылка
-    if not url.startswith('http'):
-        bot.reply_to(message, "Это не похоже на ссылку. Пришли URL.")
+    # 1. Если пользователь прислал уже готовую ссылку happ://
+    if text.startswith('happ://'):
+        bot.reply_to(message, f"Это уже извлеченная ссылка. Кидай её в дешифратор:\n\n`{text}`", parse_mode='Markdown')
+        return
+
+    # 2. Проверка, что прислали именно ссылку http
+    if not text.startswith('http'):
+        bot.reply_to(message, "Это не похоже на ссылку. Пришли URL, начинающийся с http или https.")
         return
 
     bot.send_chat_action(message.chat.id, 'typing')
-    result = extract_happ_raw(url)
+    
+    # Извлекаем RAW ссылку
+    result = extract_happ_raw(text)
 
-    if result:
-        # Отправляем результат в моноширинном шрифте, чтобы удобно было копировать
+    if result and result.startswith('happ://'):
+        # Успешно нашли
         bot.reply_to(message, f"✅ Ссылка извлечена:\n\n`{result}`", parse_mode='Markdown')
+    elif result and "Ошибка" in result:
+        # Выводим ошибку запроса, если она была
+        bot.reply_to(message, f"❌ {result}")
     else:
-        bot.reply_to(message, "❌ Не удалось найти зашифрованную ссылку в этом URL. Возможно, она уже не работает или там другой формат.")
+        # Если ничего не нашли
+        bot.reply_to(message, "❌ Не удалось найти зашифрованную ссылку. Возможно, страница изменилась или ссылка протухла.")
 
 print("Бот запущен...")
 bot.polling()
