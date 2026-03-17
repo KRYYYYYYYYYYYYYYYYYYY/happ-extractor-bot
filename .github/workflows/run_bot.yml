@@ -1,11 +1,11 @@
 name: Run Happ Extractor Bot
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # Запуск кнопкой в Actions
   schedule:
-    - cron: '0 */5 * * *'
+    - cron: '0 */5 * * *' # Перезапуск каждые 5 часов
   push:
-    branches: [ main ]
+    branches: [ main ] # Запуск при сохранении кода
 
 jobs:
   run-bot:
@@ -14,15 +14,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v4
-        with:
-          go-version: '1.21'
-
-      - name: Build Decoder
-        # Эта строчка сама создаст правильный файл 'decoder' из твоего main.go
-        run: go build -o decoder main.go
-
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
@@ -30,9 +21,6 @@ jobs:
 
       - name: Install dependencies
         run: pip install pyTelegramBotAPI requests
-
-      - name: Set permissions
-        run: chmod +x decoder
 
       - name: Run Bot
         env:
