@@ -49,16 +49,23 @@ def extract_from_atlanta_meta(html_text):
 def extract_happ_anywhere(text_or_url):
     """Ищет happ:// или вытягивает URL из метаданных страницы"""
     decoded_raw = unquote(text_or_url)
+    
+    # 1. Если happ:// уже в тексте
     match = re.search(r'happ://crypt\d/[^\s"\'<>]+', decoded_raw)
     if match: return match.group(0)
     
     if text_or_url.startswith('http'):
         try:
-            time.sleep(random.uniform(1.0, 2.0))
             h = {'User-Agent': random.choice(USER_AGENTS)}
-            r = requests.get(text_or_url, headers=h, timeout=10)
+            # ВАЖНО: allow_redirects=False, чтобы не упасть на нестандартном протоколе
+            r = requests.get(text_or_url, headers=h, timeout=10, allow_redirects=False)
             
-            # Проверка на Атланту
+            # Проверяем заголовки редиректа (для ecobuy)
+            loc = r.headers.get('Location', '')
+            if 'happ://' in unquote(loc):
+                return unquote(loc)
+
+            # Проверка на Атланту в теле страницы
             atlanta_sub = extract_from_atlanta_meta(r.text)
             if atlanta_sub: return atlanta_sub
             
@@ -95,20 +102,19 @@ def fetch_and_report(chat_id, sub_url, message_id):
     error_code = None
     
     try:
-        # Упрощаем заголовки, чтобы не пугать старые сервера (убираем br)
         headers = {
             'User-Agent': random.choice(USER_AGENTS),
             'Accept-Encoding': 'gzip, deflate', 
             'Connection': 'keep-alive'
         }
-        res = requests.get(sub_url, headers=headers, timeout=15)
+        # Для скачивания финального контента редиректы разрешаем
+        res = requests.get(sub_url, headers=headers, timeout=15, allow_redirects=True)
         error_code = res.status_code
         
         if res.status_code == 200:
-            # Декодируем аккуратно
             content = res.content.decode('utf-8', errors='ignore').strip()
-
-            # Умная проверка на Base64: только если нет явных признаков текста/структуры
+            
+            # Если это Base64 (старые подписки)
             if "://" not in content[:500] and "{" not in content[:100] and not content.startswith("#"):
                 try:
                     clean_raw = re.sub(r'[^a-zA-Z0-9+/=]', '', content)
@@ -122,24 +128,19 @@ def fetch_and_report(chat_id, sub_url, message_id):
 
     if not content or (isinstance(error_code, int) and error_code >= 400):
         kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton("🔑 Попробовать через API", callback_data="force_api"))
-        bot.edit_message_text(f"❌ Ошибка (Код: {error_code})\nПопробуйте кнопку ниже:", 
-                              chat_id, message_id, reply_markup=kb)
+        kb.add(types.InlineKeyboardButton("🔑 Через API", callback_data="force_api"))
+        bot.edit_message_text(f"❌ Ошибка (Код: {error_code})", chat_id, message_id, reply_markup=kb)
         return
 
     user_storage[chat_id] = content
-    
-    # Ищем ссылки (жадная регулярка для имен с пробелами)
     links = re.findall(r'(?:vless|vmess|ss|trojan|shadowsocks|tuic|hysteria2?)://[^\r\n"\'<>]+', content)
     
-    # Считаем признаки JSON
+    # ПРОВЕРКА ТИПА: Атланта или JSON
+    is_atlanta = "atlanta-subs" in sub_url
     has_json_struct = '"outbounds"' in content or '"nodes"' in content
-    has_brackets = content.count('{') > 2
     
-    # Определяем тип (приоритет JSON, если ссылок мало)
-    if has_json_struct or (has_brackets and len(links) <= 1):
+    if is_atlanta or has_json_struct:
         status_text = "✅ JSON Конфигурация"
-        if links and not has_json_struct: status_text += " (+ ссылки)"
     elif links:
         status_text = "ℹ️ Текстовая подписка"
     else:
@@ -150,13 +151,12 @@ def fetch_and_report(chat_id, sub_url, message_id):
         f"🌐 **Тип:** `{status_text}`\n"
         f"🔗 **Найдено ссылок:** `{len(links)}` шт.\n\n"
         f"🔗 **Линк:**\n`{sub_url}`\n\n"
-        f"⚠️ **P.S.** Используйте [конвертер]({CONVERTER_URL}) или скачайте файл."
+        f"⚠️ **P.S.** Используйте [конвертер]({CONVERTER_URL})."
     )
     
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("📥 Скачать файл", callback_data="get_all"))
     kb.add(types.InlineKeyboardButton("🔄 Через API", callback_data="force_api"))
-    
     bot.edit_message_text(report, chat_id, message_id, parse_mode='Markdown', reply_markup=kb, disable_web_page_preview=True)
     
 @bot.callback_query_handler(func=lambda c: c.data == "get_all")
