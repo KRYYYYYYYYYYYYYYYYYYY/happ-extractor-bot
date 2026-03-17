@@ -35,7 +35,7 @@ def extract_happ_raw(url):
 
 @bot.message_handler(commands=['start'])
 def start(message):
-    bot.reply_to(message, "Пришли мне короткую ссылку Happ (например, с сайта atlanta-subs), и я вытащу из неё RAW код!")
+    bot.reply_to(message, "Пр!")
 
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
