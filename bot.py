@@ -33,17 +33,33 @@ def decrypt_via_api(happ_link):
         return f"Ошибка подключения к API: {e}"
 
 def extract_happ_raw(url):
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
     try:
+        # 1. Проверяем саму входящую ссылку (декодируем %3A и т.д.)
         url_decoded = unquote(url)
         if 'happ://' in url_decoded:
             match = re.search(r'happ://crypt\d/[^"\'\s<>]+', url_decoded)
             if match: return match.group(0)
-            
+
+        # 2. Делаем запрос (allow_redirects=True по умолчанию)
         res = requests.get(url, headers=headers, timeout=10)
+        
+        # 3. Проверяем финальный URL после всех редиректов (часто ссылка там)
+        final_url_decoded = unquote(res.url)
+        if 'happ://' in final_url_decoded:
+            match = re.search(r'happ://crypt\d/[^"\'\s<>]+', final_url_decoded)
+            if match: return match.group(0)
+
+        # 4. Проверяем исходный код страницы (view-source)
         match = re.search(r'happ://crypt\d/[^"\'\s<>]+', res.text)
-        return match.group(0) if match else None
-    except:
+        if match:
+            return match.group(0)
+            
+        return None
+    except Exception as e:
+        print(f"Ошибка при извлечении: {e}")
         return None
 
 def analyze_configs(raw_text):
