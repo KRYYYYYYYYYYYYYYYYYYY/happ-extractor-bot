@@ -5,7 +5,6 @@ import re
 import base64
 import random
 import time
-import json
 from urllib.parse import unquote
 from telebot import types
 
@@ -21,102 +20,7 @@ USER_AGENTS = [
     'Happ/2.1.0 (com.happ.network; build 2100; iOS 16.1)'
 ]
 
-def split_json_objects(text):
-    """Находит JSON объекты в тексте."""
-    if not text or '{' not in text: return []
-    objs = []
-    bracket_count = 0
-    start_index = -1
-    for i, char in enumerate(text):
-        if char == '{':
-            if bracket_count == 0: start_index = i
-            bracket_count += 1
-        elif char == '}':
-            bracket_count -= 1
-            if bracket_count == 0 and start_index != -1:
-                obj_candidate = text[start_index:i+1]
-                try:
-                    json.loads(obj_candidate)
-                    objs.append(obj_candidate)
-                except: pass
-                start_index = -1
-    return objs
-
-def extract_links_from_json(json_text):
-    links = []
-    try:
-        data = json.loads(json_text)
-        # Ищем везде: в outbounds и просто в корне (на случай если это одиночный конфиг)
-        outbounds = data.get("outbounds", [])
-        if not outbounds and data.get("protocol"):
-            outbounds = [data]
-
-        for out in outbounds:
-            protocol = out.get("protocol")
-            # Пропускаем технические протоколы, которые не являются серверами
-            if protocol not in ["vless", "vmess", "shadowsocks", "trojan"]:
-                continue
-                
-            tag = out.get("tag", "node").replace(" ", "_")
-            
-            try:
-                # Пытаемся достать основные данные сервера
-                settings = out.get("settings", {})
-                vnext = settings.get("vnext", [])
-                
-                # Если vnext пуст (как в балансировщиках), пропускаем этот блок
-                if not vnext:
-                    continue
-                
-                server_info = vnext[0]
-                user = server_info.get("users", [{}])[0]
-                addr = server_info.get("address")
-                port = server_info.get("port")
-                uuid = user.get("id")
-                
-                if not all([addr, port, uuid]): # Если критических данных нет - в топку
-                    continue
-
-                # Сбор параметров транспорта
-                ss = out.get("streamSettings", {})
-                net = ss.get("network", "tcp")
-                sec = ss.get("security", "none")
-                
-                params = [f"type={net}", f"security={sec}"]
-                
-                # Добавляем Flow (для Vision)
-                if user.get("flow"): params.append(f"flow={user['flow']}")
-
-                # Reality
-                if sec == "reality":
-                    r = ss.get("realitySettings", {})
-                    params.append(f"sni={r.get('serverName', '')}")
-                    params.append(f"pbk={r.get('publicKey', '')}")
-                    params.append(f"sid={r.get('shortId', '')}")
-                    params.append(f"fp={r.get('fingerprint', 'chrome')}")
-                
-                # TLS/XTLS
-                elif sec in ["tls", "xtls"]:
-                    t = ss.get("tlsSettings", {}) or ss.get("xtlsSettings", {})
-                    params.append(f"sni={t.get('serverName', '')}")
-
-                # WebSocket / gRPC
-                if net == "ws":
-                    ws = ss.get("wsSettings", {})
-                    params.append(f"path={ws.get('path', '/')}")
-                    params.append(f"host={ws.get('headers', {}).get('Host', '')}")
-                elif net == "grpc":
-                    params.append(f"serviceName={ss.get('grpcSettings', {}).get('serviceName', '')}")
-
-                query = "&".join(params)
-                links.append(f"{protocol}://{uuid}@{addr}:{port}?{query}#{tag}")
-                
-            except Exception as e:
-                print(f"Ошибка парсинга блока: {e}")
-                continue
-                
-    except: pass
-    return links
+CONVERTER_URL = "https://cs12d7a.4pda.ws/34581412/V2RAY+Converter+fix25fix.html"
 
 def decrypt_via_api(happ_link):
     api_url = "https://api.sayori.cc/v1/decrypt"
@@ -124,122 +28,127 @@ def decrypt_via_api(happ_link):
     payload = {"link": happ_link}
     try:
         res = requests.post(api_url, json=payload, headers=headers, timeout=15)
-        return res.json().get("result") if res.status_code == 200 else None
-    except: return None
+        if res.status_code == 200:
+            data = res.json()
+            return data.get("result") if data.get("success") else None
+    except: pass
+    return None
 
-def extract_happ_raw(url):
-    headers = {'User-Agent': random.choice(USER_AGENTS)}
-    try:
-        url_dec = unquote(url)
-        if 'happ://' in url_dec:
-            m = re.search(r'happ://crypt\d/[^"\'\s<>]+', url_dec)
-            if m: return m.group(0)
-        res = requests.get(url, headers=headers, timeout=10)
-        m = re.search(r'happ://crypt\d/[^"\'\s<>]+', res.text)
-        return m.group(0) if m else None
-    except: return None
+def extract_happ_anywhere(text_or_url):
+    """Ищет happ:// в редиректах или в коде страницы (atlanta-subs и т.д.)"""
+    # 1. Если это уже прямая ссылка
+    if text_or_url.startswith('happ://'): return text_or_url
+    
+    # 2. Если happ зашит в параметрах (редирект)
+    decoded_text = unquote(text_or_url)
+    match = re.search(r'happ://crypt\d/[^\s"\'<>]+', decoded_text)
+    if match: return match.group(0)
+    
+    # 3. Если это ссылка на страницу (заходим и ищем в коде)
+    if text_or_url.startswith('http'):
+        try:
+            res = requests.get(text_or_url, headers={'User-Agent': random.choice(USER_AGENTS)}, timeout=10)
+            match = re.search(r'happ://crypt\d/[^\s"\'<>]+', res.text)
+            if match: return match.group(0)
+        except: pass
+    return None
 
 @bot.message_handler(func=lambda m: True)
 def handle_message(m):
     text = m.text.strip()
-    happ_link = text if text.startswith('happ://') else extract_happ_raw(text)
+    happ_link = extract_happ_anywhere(text)
     
     if not happ_link:
-        bot.reply_to(m, "❌ Ссылка не найдена.")
+        bot.reply_to(m, "❌ Ссылка не распознана. Пришлите прямую happ:// или ссылку на страницу.")
         return
 
-    status_msg = bot.reply_to(m, "⏳ *Стучусь в подписку...*", parse_mode='Markdown')
-    decrypted_url = decrypt_via_api(happ_link)
+    status_msg = bot.reply_to(m, "⏳ *Обработка...*", parse_mode='Markdown')
     
-    if decrypted_url:
-        sub_link = decrypted_url.strip()
-        content = ""
-        try:
-            # Имитируем запрос от v2rayNG максимально точно
-            sub_headers = {
-                'User-Agent': random.choice(USER_AGENTS),
-                'Accept': '*/*',
-                'Connection': 'keep-alive',
-                'Accept-Language': 'en-US,en;q=0.9',
-            }
-            
-            # Небольшая пауза, чтобы сервер не принял нас за спам-бота
-            time.sleep(random.uniform(1.0, 2.5)) 
-            
-            # Делаем запрос
-            sub_res = requests.get(sub_link, headers=sub_headers, timeout=20, verify=True)
-            
-            if sub_res.status_code == 200:
-                raw = sub_res.text.strip()
-                # Пытаемся понять, это Base64 или чистый текст/JSON
-                try:
-                    # Убираем возможные невидимые символы, которые мешают Base64
-                    clean_raw = re.sub(r'[^a-zA-Z0-9+/=]', '', raw)
-                    pad = len(clean_raw) % 4
-                    if pad: clean_raw += '=' * (4 - pad)
-                    content = base64.b64decode(clean_raw).decode('utf-8', errors='ignore')
-                except:
-                    content = raw
-            elif sub_res.status_code == 500:
-                bot.edit_message_text("⚠️ Сервер подписки выдал ошибку 500. Возможно, стоит попробовать позже или сменить IP бота.", m.chat.id, status_msg.message_id)
-                return
-            else:
-                bot.edit_message_text(f"❌ Ошибка сервера: {sub_res.status_code}", m.chat.id, status_msg.message_id)
-                return
-        except Exception as e:
-            bot.edit_message_text(f"❌ Сетевая ошибка: {str(e)[:40]}", m.chat.id, status_msg.message_id)
-            return
+    # Пытаемся расшифровать
+    decrypted = decrypt_via_api(happ_link)
+    final_url = decrypted if decrypted else happ_link
+    
+    fetch_and_report(m.chat.id, final_url, status_msg.message_id)
 
-        all_links = []
-        # 1. Обычные ссылки
-        direct_links = [l.strip() for l in content.split('\n') if '://' in l and not l.strip().startswith('{')]
-        all_links.extend(direct_links)
+def fetch_and_report(chat_id, sub_url, message_id):
+    content = ""
+    error_info = ""
+    
+    try:
+        headers = {'User-Agent': random.choice(USER_AGENTS), 'Accept': '*/*'}
+        # Небольшая пауза для обхода защиты
+        time.sleep(1.5)
+        res = requests.get(sub_url, headers=headers, timeout=15)
         
-        # 2. Извлечение из JSON
-        jsons = split_json_objects(content)
-        for j_obj in jsons:
-            all_links.extend(extract_links_from_json(j_obj))
-        
-        if not all_links:
-            bot.edit_message_text("❌ Внутри подписки пусто.", m.chat.id, status_msg.message_id)
-            return
+        if res.status_code == 200:
+            raw = res.text.strip()
+            # Пробуем Base64
+            try:
+                # Очистка от мусора перед декодом
+                clean_raw = re.sub(r'[^a-zA-Z0-9+/=]', '', raw)
+                pad = len(clean_raw) % 4
+                if pad: clean_raw += '=' * (4 - pad)
+                content = base64.b64decode(clean_raw).decode('utf-8', errors='ignore')
+            except:
+                content = raw
+        else:
+            error_info = f"Ошибка сервера: {res.status_code}"
+    except Exception as e:
+        error_info = f"Ошибка сети: {str(e)[:30]}"
 
-        user_storage[m.chat.id] = "\n".join(all_links)
-        
-        stats = {}
-        for l in all_links:
-            proto = l.split('://')[0].upper()
-            stats[proto] = stats.get(proto, 0) + 1
-        stats_info = "\n".join([f"🔹 {k}: `{v}`" for k, v in stats.items()])
+    if not content and not error_info:
+        error_info = "Контент пуст"
 
-        report = (
-            f"✅ **Готово!**\n\n"
-            f"🚀 Всего серверов: `{len(all_links)} шт.`\n"
-            f"📦 Распаковано JSON: `{len(jsons)}` объектов\n"
-            f"━━━━━━━━━━━━━━━\n{stats_info}"
-        )
-        
+    if error_info:
         kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton("📥 Скачать All Config (.txt)", callback_data="get_all"))
-        bot.edit_message_text(report, m.chat.id, status_msg.message_id, parse_mode='Markdown', reply_markup=kb)
+        kb.add(types.InlineKeyboardButton("🔑 Попробовать API дешифровку", callback_data=f"force_api"))
+        bot.edit_message_text(f"❌ {error_info}\n\nПопробуйте принудительную расшифровку:", chat_id, message_id, reply_markup=kb)
+        return
+
+    user_storage[chat_id] = content
+    
+    # Ищем только прямые ссылки
+    links = [l.strip() for l in content.split('\n') if '://' in l and not l.strip().startswith('{')]
+    
+    report = (
+        f"✅ **Готово!**\n\n"
+        f"🔗 **Линк:** `{sub_url}`\n"
+        f"📊 **Найдено ссылок:** `{len(links)}` шт.\n\n"
+        f"⚠️ **P.S.** Если в подписке есть сложные JSON-конфигурации (автовыбор), бот может их пропустить. "
+        f"В таком случае извлеките их вручную или используйте [этот конвертер]({CONVERTER_URL})."
+    )
+    
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("📥 Скачать All Config", callback_data="get_all"))
+    kb.add(types.InlineKeyboardButton("⚙️ Принудительное API", callback_data="force_api"))
+    
+    bot.edit_message_text(report, chat_id, message_id, parse_mode='Markdown', reply_markup=kb, disable_web_page_preview=True)
+
+@bot.callback_query_handler(func=lambda c: c.data == "force_api")
+def force_api_callback(call):
+    # Достаем последнюю ссылку из сообщения
+    msg_text = call.message.text
+    match = re.search(r'https?://[^\s]+', msg_text)
+    if match:
+        url = match.group(0).strip('`')
+        bot.answer_callback_query(call.id, "Запрос к Sayori API...")
+        decrypted = decrypt_via_api(url)
+        if decrypted:
+            fetch_and_report(call.message.chat.id, decrypted, call.message.message_id)
+        else:
+            bot.answer_callback_query(call.id, "API не дало результата.", show_alert=True)
     else:
-        bot.edit_message_text("❌ Ошибка расшифровки.", m.chat.id, status_msg.message_id)
+        bot.answer_callback_query(call.id, "Ссылка не найдена.")
 
 @bot.callback_query_handler(func=lambda c: c.data == "get_all")
 def get_all(call):
     content = user_storage.get(call.message.chat.id)
-    if not content:
-        bot.answer_callback_query(call.id, "Данные не найдены. Попробуй еще раз.")
-        return
+    if not content: return
     
-    # Отправляем текстовым файлом
-    file_path = f"sub_{call.message.chat.id}.txt"
-    with open(file_path, "w", encoding="utf-8") as f:
-        f.write(content)
-    
+    file_path = f"config_{call.message.chat.id}.txt"
+    with open(file_path, "w", encoding="utf-8") as f: f.write(content)
     with open(file_path, "rb") as f:
-        bot.send_document(call.message.chat.id, f, caption="Все найденные конфиги (ссылки)")
-    
+        bot.send_document(call.message.chat.id, f, caption="Полное содержимое подписки")
     os.remove(file_path)
     bot.answer_callback_query(call.id)
 
