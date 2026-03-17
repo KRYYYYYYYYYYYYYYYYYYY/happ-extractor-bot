@@ -2,6 +2,7 @@ import os
 import telebot
 import requests
 import re
+import base64
 from urllib.parse import unquote
 from telebot import types
 
@@ -20,11 +21,11 @@ def decrypt_via_api(happ_link):
         if res.status_code == 200:
             data = res.json()
             return data.get("result") if data.get("success") else None
-        return None
     except: return None
 
 def extract_happ_raw(url):
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    # Здесь браузерный агент уместен, так как мы смотрим страницу-инструкцию
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
     try:
         url_dec = unquote(url)
         if 'happ://' in url_dec:
@@ -48,77 +49,79 @@ def handle_message(m):
         bot.reply_to(m, "❌ Ссылка не найдена.")
         return
 
-    status_msg = bot.reply_to(m, "⏳ *Расшифровываю...*", parse_mode='Markdown')
-    decrypted_data = decrypt_via_api(happ_link)
+    status_msg = bot.reply_to(m, "⏳ *Расшифровываю и лезу внутрь подписки...*", parse_mode='Markdown')
+    decrypted_url = decrypt_via_api(happ_link)
     
-    if decrypted_data:
-        # 1. Ссылка на подписку (то, что мы получили от API)
-        subscription_link = decrypted_data.strip()
-        
-        # 2. Идем по ссылке подписки, чтобы узнать, что ВНУТРИ (кол-во серверов)
-        try:
-            # Пытаемся скачать содержимое подписки для анализа
-            sub_res = requests.get(subscription_link, timeout=10)
-            internal_content = sub_res.text
-            # Если там Base64 (часто бывает), пробуем декодировать для статистики
-            import base64
-            try:
-                internal_content = base64.b64decode(internal_content).decode('utf-8')
-            except: pass
-            
-            configs = [line.strip() for line in internal_content.split('\n') if '://' in line]
-        except:
-            configs = []
+    if decrypted_url:
+        subscription_link = decrypted_url.strip()
+        configs = []
 
-        user_storage[m.chat.id] = configs # Сохраняем список серверов
-        
-        # Считаем протоколы внутри
+        # ВОТ ТУТ МЫ ПРИКИДЫВАЕМСЯ ВПН-КЛИЕНТОМ
+        try:
+            sub_headers = {
+                'User-Agent': 'v2rayNG/1.8.5 (com.v2ray.ang; build 100805; Android 13)',
+                'Accept': '*/*',
+            }
+            sub_res = requests.get(subscription_link, headers=sub_headers, timeout=12)
+            
+            if sub_res.status_code == 200:
+                raw_content = sub_res.text.strip()
+                # Декодируем Base64
+                try:
+                    missing_padding = len(raw_content) % 4
+                    if missing_padding: raw_content += '=' * (4 - missing_padding)
+                    internal_content = base64.b64decode(raw_content).decode('utf-8', errors='ignore')
+                except:
+                    internal_content = raw_content
+                
+                configs = [line.strip() for line in internal_content.split('\n') if '://' in line]
+        except: pass
+
+        user_storage[m.chat.id] = configs
         stats = {}
         for c in configs:
             proto = c.split('://')[0].upper()
             stats[proto] = stats.get(proto, 0) + 1
         
-        stats_info = "\n".join([f"🔹 {k}: `{v}`" for k, v in stats.items()]) if stats else "🔹 Протоколы: `Не удалось определить`"
+        stats_info = "\n".join([f"🔹 {k}: `{v}`" for k, v in stats.items()]) if stats else "🔹 Внутри: `Доступ заблокирован сервером`"
         
-        # ФОРМИРУЕМ СООБЩЕНИЕ
         report = (
             f"✅ **Готово!**\n\n"
             f"🔗 **Ссылка на подписку:**\n"
-            f"```\n{subscription_link}\n```\n" # Ссылка, которую удобно скопировать
+            f"```\n{subscription_link}\n```\n"
             f"📊 **Внутри найдено серверов:** `{len(configs)}`\n"
             f"{stats_info}"
         )
         
         kb = types.InlineKeyboardMarkup()
         if configs:
-            kb.add(types.InlineKeyboardButton("✂️ Конфиги по отдельности", callback_data="get_sep"))
-            kb.add(types.InlineKeyboardButton("📦 All Configs (одним файлом)", callback_data="get_all"))
+            kb.add(types.InlineKeyboardButton("✂️ По отдельности", callback_data="get_sep"))
+            kb.add(types.InlineKeyboardButton("📦 All Configs (.txt)", callback_data="get_all"))
         
         bot.edit_message_text(report, m.chat.id, status_msg.message_id, parse_mode='Markdown', reply_markup=kb)
     else:
-        bot.edit_message_text("❌ Ошибка дешифровки через Sayori API.", m.chat.id, status_msg.message_id)
+        bot.edit_message_text("❌ Ошибка Sayori API.", m.chat.id, status_msg.message_id)
 
-# Обработчики кнопок (остаются такими же, как в прошлом шаге)
+# (Обработчики кнопок get_sep и get_all остаются без изменений)
 @bot.callback_query_handler(func=lambda c: c.data == "get_sep")
 def get_sep(call):
-    configs = user_storage.get(call.message.chat.id)
+    configs = user_storage.get(call.message.chat.id, [])
     if not configs: return
-    text = "📝 **Конфиги по отдельности (первые 20):**\n\n"
-    for c in configs[:20]:
-        text += f"```\n{c}\n```\n"
+    text = "📝 **Конфиги (топ 20):**\n\n"
+    for c in configs[:20]: text += f"```\n{c}\n```\n"
     bot.send_message(call.message.chat.id, text, parse_mode='Markdown')
     bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda c: c.data == "get_all")
 def get_all(call):
-    configs = user_storage.get(call.message.chat.id)
+    configs = user_storage.get(call.message.chat.id, [])
     if not configs: return
     full_text = "\n".join(configs)
-    file_path = f"configs_{call.message.chat.id}.txt"
+    file_path = f"sub_{call.message.chat.id}.txt"
     with open(file_path, "w", encoding="utf-8") as f: f.write(full_text)
     with open(file_path, "rb") as f:
-        bot.send_document(call.message.chat.id, f, caption="📂 Все конфиги одним файлом")
-    os.remove(file_path)
+        bot.send_document(call.message.chat.id, f, caption="📂 Файл для импорта")
+    if os.path.exists(file_path): os.remove(file_path)
     bot.answer_callback_query(call.id)
 
 bot.polling()
