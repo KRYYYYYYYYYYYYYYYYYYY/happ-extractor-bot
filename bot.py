@@ -13,24 +13,40 @@ bot = telebot.TeleBot(TOKEN)
 user_storage = {}
 
 def decrypt_via_api(happ_link):
-    """Отправляет ссылку на API Sayori с использованием ключа авторизации"""
-    api_url = "https://happ.sayori.cc/api/key"
+    """Дешифровка через официальное API v1 Sayori по инструкции"""
+    # Новый точный адрес из доков
+    api_url = "https://api.sayori.cc/v1/decrypt"
+    
+    # Заголовки: тип контента и твой x-api-key
+    headers = {
+        "Content-Type": "application/json",
+        "x-api-key": SAYORI_KEY
+    }
+    
+    # Тело запроса: ключ должен называться 'link'
+    payload = {
+        "link": happ_link
+    }
+    
     try:
-        # Формируем запрос согласно документации Sayori
-        payload = {
-            'key': happ_link,
-            'api_key': SAYORI_KEY  # Передаем твой ключ
-        }
-        response = requests.post(api_url, data=payload, timeout=15)
+        # Отправляем POST с JSON
+        response = requests.post(api_url, json=payload, headers=headers, timeout=15)
         
         if response.status_code == 200:
-            return response.text.strip()
+            result_json = response.json()
+            # Согласно докам, ответ приходит в поле 'result'
+            if result_json.get("success"):
+                return result_json.get("result", "Ошибка: Поле result пустое")
+            else:
+                return f"❌ Ошибка API: success=false. Проверь ссылку."
+        
         elif response.status_code == 401:
-            return "Ошибка: Неверный API ключ Sayori. Проверь секреты GitHub."
+            return "❌ Ошибка: Неверный x-api-key. Проверь секреты в GitHub."
         else:
-            return f"Ошибка API: Код {response.status_code}. {response.text[:100]}"
+            return f"❌ Ошибка API {response.status_code}: {response.text[:100]}"
+            
     except Exception as e:
-        return f"Ошибка подключения к API: {e}"
+        return f"❌ Ошибка запроса: {e}"
 
 def extract_happ_raw(url):
     headers = {
