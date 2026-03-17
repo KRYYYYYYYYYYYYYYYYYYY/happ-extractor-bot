@@ -2,134 +2,90 @@ import os
 import telebot
 import requests
 import re
-import subprocess
 from urllib.parse import unquote
 from telebot import types
 
-# Настройки
 TOKEN = os.getenv('TELEGRAM_TOKEN')
 bot = telebot.TeleBot(TOKEN)
 
-# Временное хранилище конфигов (чтобы не гонять дешифратор дважды)
 user_storage = {}
 
+def decrypt_via_api(happ_link):
+    """Отправляет ссылку на API Sayori для дешифровки"""
+    api_url = "https://happ.sayori.cc/api/key"
+    try:
+        # Отправляем POST запрос с ссылкой
+        response = requests.post(api_url, data={'key': happ_link}, timeout=15)
+        if response.status_code == 200:
+            return response.text.strip()
+        else:
+            return f"Ошибка API: Код {response.status_code}. Возможно, ссылка невалидна."
+    except Exception as e:
+        return f"Ошибка подключения к API: {e}"
+
 def extract_happ_raw(url):
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0'}
     try:
-        # 1. Декодируем саму входящую ссылку (на случай, если happ:// зашито внутри как параметр)
-        decoded_url = unquote(url)
+        url = unquote(url)
+        if 'happ://' in url:
+            return re.split(r'["\'\s<>]', url[url.find('happ://'):])[0]
         
-        # 2. Если в декодированном URL уже есть happ://, забираем его сразу
-        if 'happ://' in decoded_url:
-            # Ищем начало happ:// и берем всё до конца или до кавычки/пробела
-            start_index = decoded_url.find('happ://')
-            # Вырезаем кусок, убирая возможный мусор в конце
-            raw_from_url = re.split(r'["\'\s<>]', decoded_url[start_index:])[0]
-            return raw_from_url
-
-        # 3. Если в URL не нашли, идем на саму страницу
-        response = requests.get(url, headers=headers, timeout=10)
-        
-        # Проверяем финальный URL после всех редиректов (тоже декодируем)
-        final_url = unquote(response.url)
-        if 'happ://' in final_url:
-            start_index = final_url.find('happ://')
-            return re.split(r'["\'\s<>]', final_url[start_index:])[0]
-
-        # Ищем в HTML коде страницы
-        html = response.text
-        raw_match = re.search(r'happ://crypt\d/[^"\'\s<>]+', html)
-        if raw_match:
-            return raw_match.group(0)
-            
+        res = requests.get(url, headers=headers, timeout=10)
+        raw_match = re.search(r'happ://crypt\d/[^"\'\s<>]+', res.text)
+        return raw_match.group(0) if raw_match else None
+    except:
         return None
-    except Exception as e:
-        return f"Ошибка при запросе: {e}"
-
-def decrypt_link(happ_link):
-    """Запускает твой Go-дешифратор и возвращает результат"""
-    try:
-        # Запускаем бинарник. Важно: ./decoder должен быть в корне репозитория
-        result = subprocess.run(['./decoder', happ_link], capture_output=True, text=True, timeout=15)
-        if result.returncode == 0:
-            return result.stdout.strip()
-        return f"Ошибка дешифратора: {result.stderr}"
-    except Exception as e:
-        return f"Ошибка запуска: {e}"
 
 def analyze_configs(raw_text):
-    """Считает количество и все возможные типы конфигов"""
-    lines = [line.strip() for line in raw_text.split('\n') if line.strip()]
-    # Словарь для сбора статистики
+    lines = [l.strip() for l in raw_text.split('\n') if '://' in l]
     stats = {}
-    
     for line in lines:
-        # Извлекаем название протокола до символов ://
-        protocol_match = re.match(r'^([a-zA-Z0-9]+)://', line.lower())
-        if protocol_match:
-            proto = protocol_match.group(1).upper() # Получаем например 'VLESS' или 'HY2'
-            stats[proto] = stats.get(proto, 0) + 1
-        else:
-            stats["UNKNOWN"] = stats.get("UNKNOWN", 0) + 1
-    
-    return len(lines), stats, lines
+        protocol = line.split('://')[0].upper()
+        stats[protocol] = stats.get(protocol, 0) + 1
+    return len(lines), stats, raw_text
 
-@bot.message_handler(commands=['start'])
-def start(message):
-    bot.reply_to(message, "Пр!")
-
-@bot.message_handler(func=lambda message: True)
-def handle_message(message):
-    text = message.text.strip()
-    
-    # Если прислали сразу happ:// или ссылку http://
+@bot.message_handler(func=lambda m: True)
+def handle_message(m):
+    text = m.text.strip()
     happ_link = text if text.startswith('happ://') else extract_happ_raw(text)
-
-    if not happ_link or "Ошибка" in str(happ_link):
-        bot.reply_to(message, "❌ Не удалось найти или извлечь ссылку.")
+    
+    if not happ_link:
+        bot.reply_to(m, "❌ Ссылка не найдена в сообщении.")
         return
 
-    bot.send_chat_action(message.chat.id, 'typing')
+    bot.send_chat_action(m.chat.id, 'typing')
     
-    # Дешифруем
-    decrypted_data = decrypt_link(happ_link)
+    # Используем API вместо локального дешифратора
+    decrypted_data = decrypt_via_api(happ_link)
     
-    if "vless://" in decrypted_data or "vmess://" in decrypted_data or "ss://" in decrypted_data:
-        total, stats, configs_list = analyze_configs(decrypted_data)
+    if '://' in decrypted_data:
+        total, stats, content = analyze_configs(decrypted_data)
+        user_storage[m.chat.id] = content
         
-        # Сохраняем в память (ключ - ID сообщения, чтобы не путать пользователей)
-        user_storage[message.chat.id] = decrypted_data
-        
-        # Формируем отчет
-        types_str = ", ".join([f"{k}: {v}" for k, v in stats.items() if v > 0])
+        # Красивый вывод типов
+        stats_info = "\n".join([f"🔹 {k}: `{v}`" for k, v in stats.items()])
         report = (
-            f"✅ **Данные расшифрованы!**\n\n"
+            f"✅ **Успешно расшифровано через API!**\n\n"
             f"📊 Всего конфигов: `{total}`\n"
-            f"⚙️ Типы: `{types_str}`\n"
-            f"🔗 Формат: Ссылки"
+            f"{stats_info}"
         )
         
-        # Кнопка
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("📥 Получить конфиги", callback_data="get_configs"))
-        
-        bot.send_message(message.chat.id, report, parse_mode='Markdown', reply_markup=markup)
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("📥 Получить все конфиги", callback_data="get_data"))
+        bot.send_message(m.chat.id, report, parse_mode='Markdown', reply_markup=kb)
     else:
-        bot.reply_to(message, f"❌ Ошибка дешифровки:\n`{decrypted_data[:100]}`", parse_mode='Markdown')
+        bot.reply_to(m, f"❌ API не смогло расшифровать это:\n`{decrypted_data}`", parse_mode='Markdown')
 
-@bot.callback_query_handler(func=lambda call: call.data == "get_configs")
-def send_configs(call):
-    configs = user_storage.get(call.message.chat.id)
-    if configs:
-        # Если текста слишком много (лимит ТГ 4096 символов), отправляем файлом
-        if len(configs) < 3500:
-            bot.send_message(call.message.chat.id, f"```\n{configs}\n```", parse_mode='Markdown')
+@bot.callback_query_handler(func=lambda c: c.data == "get_data")
+def send_data(call):
+    data = user_storage.get(call.message.chat.id)
+    if data:
+        if len(data) < 3500:
+            bot.send_message(call.message.chat.id, f"```\n{data}\n```", parse_mode='Markdown')
         else:
-            with open("configs.txt", "w", encoding="utf-8") as f:
-                f.write(configs)
-            bot.send_document(call.message.chat.id, open("configs.txt", "rb"), caption="Твои конфиги")
+            with open("out.txt", "w", encoding="utf-8") as f: f.write(data)
+            bot.send_document(call.message.chat.id, open("out.txt", "rb"), caption="Твои конфиги")
     else:
-        bot.answer_callback_query(call.id, "Конфиги не найдены. Попробуй отправить ссылку заново.")
+        bot.answer_callback_query(call.id, "Данные устарели.")
 
-print("Бот запущен...")
 bot.polling()
