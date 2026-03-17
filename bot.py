@@ -95,19 +95,21 @@ def fetch_and_report(chat_id, sub_url, message_id):
     error_code = None
     
     try:
+        # Упрощаем заголовки, чтобы не пугать старые сервера (убираем br)
         headers = {
             'User-Agent': random.choice(USER_AGENTS),
-            'Accept-Encoding': 'gzip, deflate, br',
+            'Accept-Encoding': 'gzip, deflate', 
+            'Connection': 'keep-alive'
         }
         res = requests.get(sub_url, headers=headers, timeout=15)
         error_code = res.status_code
         
         if res.status_code == 200:
-            # Декодируем аккуратно, игнорируя бинарные артефакты gzip
+            # Декодируем аккуратно
             content = res.content.decode('utf-8', errors='ignore').strip()
 
-            # Если контент похож на чистый Base64 (без протоколов и решеток)
-            if "://" not in content and not content.startswith("#"):
+            # Умная проверка на Base64: только если нет явных признаков текста/структуры
+            if "://" not in content[:500] and "{" not in content[:100] and not content.startswith("#"):
                 try:
                     clean_raw = re.sub(r'[^a-zA-Z0-9+/=]', '', content)
                     if len(clean_raw) > 30:
@@ -120,39 +122,43 @@ def fetch_and_report(chat_id, sub_url, message_id):
 
     if not content or (isinstance(error_code, int) and error_code >= 400):
         kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton("🔑 Принудительно через API", callback_data="force_api"))
-        bot.edit_message_text(f"❌ Ошибка (Код: {error_code})", chat_id, message_id, reply_markup=kb)
+        kb.add(types.InlineKeyboardButton("🔑 Попробовать через API", callback_data="force_api"))
+        bot.edit_message_text(f"❌ Ошибка (Код: {error_code})\nПопробуйте кнопку ниже:", 
+                              chat_id, message_id, reply_markup=kb)
         return
 
     user_storage[chat_id] = content
     
-    # НОВАЯ РЕГУЛЯРКА: ищет протокол и забирает ВСЁ до конца строки
-    # Это позволит не ломать ссылки с пробелами и эмодзи в именах
-    links = re.findall(r'(?:vless|vmess|ss|trojan|shadowsocks|tuic|hysteria2?)://[^\r\n]+', content)
+    # Ищем ссылки (жадная регулярка для имен с пробелами)
+    links = re.findall(r'(?:vless|vmess|ss|trojan|shadowsocks|tuic|hysteria2?)://[^\r\n"\'<>]+', content)
     
-    has_json = '"outbounds"' in content or ('{' in content and '"' in content)
+    # Считаем признаки JSON
+    has_json_struct = '"outbounds"' in content or '"nodes"' in content
+    has_brackets = content.count('{') > 2
     
-    if links:
-        json_note = "ℹ️ Текстовая подписка" + (" (+ JSON)" if has_json else "")
-    elif has_json:
-        json_note = "✅ Обнаружен JSON конфиг"
+    # Определяем тип (приоритет JSON, если ссылок мало)
+    if has_json_struct or (has_brackets and len(links) <= 1):
+        status_text = "✅ JSON Конфигурация"
+        if links and not has_json_struct: status_text += " (+ ссылки)"
+    elif links:
+        status_text = "ℹ️ Текстовая подписка"
     else:
-        json_note = "📄 Текстовый файл"
+        status_text = "📄 Текстовый файл"
 
     report = (
         f"✅ **Готово!**\n\n"
-        f"🌐 **Тип:** `{json_note}`\n"
+        f"🌐 **Тип:** `{status_text}`\n"
         f"🔗 **Найдено ссылок:** `{len(links)}` шт.\n\n"
         f"🔗 **Линк:**\n`{sub_url}`\n\n"
         f"⚠️ **P.S.** Используйте [конвертер]({CONVERTER_URL}) или скачайте файл."
     )
     
     kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("📥 Скачать контент", callback_data="get_all"))
-    kb.add(types.InlineKeyboardButton("🔄 Повторить через API", callback_data="force_api"))
+    kb.add(types.InlineKeyboardButton("📥 Скачать файл", callback_data="get_all"))
+    kb.add(types.InlineKeyboardButton("🔄 Через API", callback_data="force_api"))
     
     bot.edit_message_text(report, chat_id, message_id, parse_mode='Markdown', reply_markup=kb, disable_web_page_preview=True)
-
+    
 @bot.callback_query_handler(func=lambda c: c.data == "get_all")
 def get_all(call):
     content = user_storage.get(call.message.chat.id)
