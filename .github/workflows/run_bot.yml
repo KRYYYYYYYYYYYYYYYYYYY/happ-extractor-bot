@@ -1,18 +1,18 @@
 name: Run Happ Extractor Bot
 
 on:
-  workflow_dispatch: # Запуск кнопкой
+  workflow_dispatch: # Запуск кнопкой вручную
   schedule:
-    - cron: '*/300 * * * *' # Перезапуск каждые 5 часов (чтобы не умереть по таймауту)
+    - cron: '0 */5 * * *' # Перезапуск каждые 5 часов
   push:
-    branches: [ main ] # Запуск при обновлении кода
+    branches: [ main ] # Запуск при обновлении кода или загрузке дешифратора
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -22,6 +22,9 @@ jobs:
       - name: Install dependencies
         run: |
           pip install pyTelegramBotAPI requests
+
+      - name: Set permissions for decoder
+        run: chmod +x decoder # ДАЕМ ПРАВА НА ЗАПУСК БИНАРНИКА
 
       - name: Run Bot
         env:
