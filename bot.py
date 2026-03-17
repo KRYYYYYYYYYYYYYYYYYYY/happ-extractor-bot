@@ -15,7 +15,6 @@ SAYORI_KEY = os.getenv('SAYORI_KEY')
 bot = telebot.TeleBot(TOKEN)
 user_storage = {}
 
-# Максимально "живая" маскировка
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
     'v2rayNG/1.8.5 (com.v2ray.ang; build 100805; Android 13)',
@@ -36,20 +35,36 @@ def decrypt_via_api(happ_link):
     except: pass
     return None
 
+def extract_from_atlanta_meta(html_text):
+    """Специфичный парсер для ссылок типа atlanta-subs"""
+    try:
+        match = re.search(r'data-panel="([^"]+)"', html_text)
+        if match:
+            decoded = base64.b64decode(match.group(1)).decode('utf-8')
+            data = json.loads(decoded)
+            # Пытаемся забрать прямую ссылку на подписку из объекта
+            return data.get("response", {}).get("subscriptionUrl")
+    except: pass
+    return None
+
 def extract_happ_anywhere(text_or_url):
-    """Глубокий поиск happ:// ссылки"""
-    # Если это редирект-ссылка, декодируем её сразу
+    """Глубокий поиск happ:// ссылки или переход по метаданным"""
     decoded_raw = unquote(text_or_url)
-    
-    # Ищем паттерн happ://
     match = re.search(r'happ://crypt\d/[^\s"\'<>]+', decoded_raw)
     if match: return match.group(0)
     
-    # Если это просто URL сайта, пробуем зайти
     if text_or_url.startswith('http'):
         try:
+            # Небольшая пауза перед запросом к сайту
+            time.sleep(random.uniform(1.0, 2.0))
             h = {'User-Agent': random.choice(USER_AGENTS)}
             r = requests.get(text_or_url, headers=h, timeout=10)
+            
+            # Сначала проверяем на наличие data-panel (Атланта)
+            atlanta_sub = extract_from_atlanta_meta(r.text)
+            if atlanta_sub: return atlanta_sub
+            
+            # Если нет, ищем обычный happ:// в коде
             match = re.search(r'happ://crypt\d/[^\s"\'<>]+', r.text)
             if match: return match.group(0)
         except: pass
@@ -58,17 +73,21 @@ def extract_happ_anywhere(text_or_url):
 @bot.message_handler(func=lambda m: True)
 def handle_message(m):
     text = m.text.strip()
-    happ_link = extract_happ_anywhere(text)
+    # 1. Сначала ищем саму ссылку happ или подписку через метаданные
+    target_link = extract_happ_anywhere(text)
     
-    if not happ_link:
-        bot.reply_to(m, "❌ Не удалось найти happ:// ссылку.")
+    if not target_link:
+        bot.reply_to(m, "❌ Не удалось найти happ:// или ссылку на подписку.")
         return
 
     status_msg = bot.reply_to(m, "⏳ *Стучусь в сервер...*", parse_mode='Markdown')
     
-    # Первичная проверка через API
-    decrypted = decrypt_via_api(happ_link)
-    final_url = decrypted if decrypted else happ_link
+    # 2. Если это happ:// — пробуем API. Если это уже прямая подписка — идем дальше.
+    if target_link.startswith('happ://'):
+        decrypted = decrypt_via_api(target_link)
+        final_url = decrypted if decrypted else target_link
+    else:
+        final_url = target_link
     
     fetch_and_report(m.chat.id, final_url, status_msg.message_id)
 
@@ -77,7 +96,6 @@ def fetch_and_report(chat_id, sub_url, message_id):
     error_code = None
     
     try:
-        # Улучшенные заголовки для обхода 500 ошибки
         headers = {
             'User-Agent': random.choice(USER_AGENTS),
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
@@ -91,11 +109,10 @@ def fetch_and_report(chat_id, sub_url, message_id):
         
         if res.status_code == 200:
             raw = res.text.strip()
-            # Проверка на Base64
             try:
                 clean_raw = re.sub(r'[^a-zA-Z0-9+/=]', '', raw)
                 content = base64.b64decode(clean_raw).decode('utf-8', errors='ignore')
-                if '://' not in content and '{' not in content: # Если расшифровалось в мусор
+                if '://' not in content and '{' not in content:
                     content = raw
             except:
                 content = raw
@@ -105,13 +122,11 @@ def fetch_and_report(chat_id, sub_url, message_id):
     if not content or (isinstance(error_code, int) and error_code >= 400):
         kb = types.InlineKeyboardMarkup()
         kb.add(types.InlineKeyboardButton("🔑 Принудительно через API", callback_data="force_api"))
-        bot.edit_message_text(f"❌ Ошибка получения (Код: {error_code})\nПопробуйте расшифровать ссылку через API кнопку ниже.", 
+        bot.edit_message_text(f"❌ Ошибка получения (Код: {error_code})\nПопробуйте API дешифровку:", 
                               chat_id, message_id, reply_markup=kb)
         return
 
     user_storage[chat_id] = content
-    
-    # Анализ содержимого
     links = [l.strip() for l in content.split('\n') if '://' in l and not l.strip().startswith('{')]
     has_json = '{' in content and '}' in content
     
@@ -122,7 +137,7 @@ def fetch_and_report(chat_id, sub_url, message_id):
         f"🌐 **Тип:** `{json_note}`\n"
         f"🔗 **Найдено ссылок:** `{len(links)}` шт.\n\n"
         f"🔗 **Линк:**\n`{sub_url}`\n\n"
-        f"⚠️ **P.S.** Сложные JSON-структуры бот не парсит. Используйте [конвертер]({CONVERTER_URL}) или скачайте файл(При перенаправлении на страницу с таким содержимым 'Данная информация удалена или недоступна' используйте впн.)."
+        f"⚠️ **P.S.** Сложные JSON-структуры бот не парсит. Используйте [конвертер]({CONVERTER_URL}) или скачайте файл."
     )
     
     kb = types.InlineKeyboardMarkup()
@@ -133,24 +148,20 @@ def fetch_and_report(chat_id, sub_url, message_id):
 
 @bot.callback_query_handler(func=lambda c: c.data == "force_api")
 def force_api_callback(call):
-    # Извлекаем URL из сообщения
     urls = re.findall(r'https?://[^\s`]+', call.message.text)
     if urls:
-        target = urls[-1] # Берем последнюю ссылку (обычно это ссылка подписки)
-        bot.answer_callback_query(call.id, "Отправляю в Sayori API...")
+        target = urls[-1]
+        bot.answer_callback_query(call.id, "Запрос к API...")
         dec = decrypt_via_api(target)
         if dec:
             fetch_and_report(call.message.chat.id, dec, call.message.message_id)
         else:
-            bot.answer_callback_query(call.id, "API не смогло расшифровать.", show_alert=True)
-    else:
-        bot.answer_callback_query(call.id, "Ссылка не найдена.")
+            bot.answer_callback_query(call.id, "API не дало результата.", show_alert=True)
 
 @bot.callback_query_handler(func=lambda c: c.data == "get_all")
 def get_all(call):
     content = user_storage.get(call.message.chat.id)
     if not content: return
-    
     ext = "json" if "{" in content else "txt"
     file_path = f"config_{call.message.chat.id}.{ext}"
     with open(file_path, "w", encoding="utf-8") as f: f.write(content)
