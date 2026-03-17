@@ -5,6 +5,7 @@ import re
 import base64
 import random
 import time
+import json
 from urllib.parse import unquote
 from telebot import types
 
@@ -19,6 +20,31 @@ USER_AGENTS = [
     'NekoBox/1.3.1 (com.matsuri.nekobox; build 10301; Android 12)',
     'Happ/2.1.0 (com.happ.network; build 2100; iOS 16.1)'
 ]
+
+def split_json_objects(text):
+    """Разделяет склеенные JSON-объекты и проверяет их валидность."""
+    objs = []
+    # Ищем потенциальные границы объектов {...}
+    # Используем простой счетчик скобок для надежности при склейке
+    bracket_count = 0
+    start_index = -1
+    
+    for i, char in enumerate(text):
+        if char == '{':
+            if bracket_count == 0:
+                start_index = i
+            bracket_count += 1
+        elif char == '}':
+            bracket_count -= 1
+            if bracket_count == 0 and start_index != -1:
+                obj_candidate = text[start_index:i+1]
+                try:
+                    json.loads(obj_candidate)
+                    objs.append(obj_candidate)
+                except:
+                    pass
+                start_index = -1
+    return objs
 
 def decrypt_via_api(happ_link):
     api_url = "https://api.sayori.cc/v1/decrypt"
@@ -62,64 +88,60 @@ def handle_message(m):
     
     if decrypted_url:
         sub_link = decrypted_url.strip()
-        time.sleep(1) # Небольшая пауза перед запросом к серверу подписки
+        time.sleep(1)
         
         content = ""
-        data_type = "Не удалось получить данные"
-        configs = []
+        found_jsons = []
+        found_links = []
 
         try:
             sub_headers = {
                 'User-Agent': random.choice(USER_AGENTS),
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-                'Accept-Language': 'ru-RU,ru;q=0.8,en-US;q=0.5,en;q=0.3',
+                'Accept': '*/*',
                 'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
-                'Cache-Control': 'max-age=0'
             }
             sub_res = requests.get(sub_link, headers=sub_headers, timeout=15)
             
             if sub_res.status_code == 200 and sub_res.text.strip():
                 raw = sub_res.text.strip()
-                # Декодируем Base64
                 try:
-                    missing_padding = len(raw) % 4
-                    if missing_padding: raw += '=' * (4 - missing_padding)
+                    pad = len(raw) % 4
+                    if pad: raw += '=' * (4 - pad)
                     content = base64.b64decode(raw).decode('utf-8', errors='ignore')
                 except:
                     content = raw
                 
-                if content.strip().startswith('{') or content.strip().startswith('['):
-                    data_type = "📦 JSON-конфигурация"
-                    configs = [content]
-                else:
-                    data_type = "🔗 Список ссылок (vless/vmess/...)"
-                    configs = [line.strip() for line in content.split('\n') if '://' in line]
+                # Поиск JSON-объектов
+                found_jsons = split_json_objects(content)
+                # Поиск классических ссылок
+                found_links = [line.strip() for line in content.split('\n') if '://' in line and not line.strip().startswith('{')]
+                
             else:
-                data_type = f"⚠️ Ошибка сервера: {sub_res.status_code}"
+                content = f"⚠️ Ошибка сервера: {sub_res.status_code}"
         except Exception as e:
-            data_type = f"❌ Ошибка запроса: {str(e)[:50]}"
+            content = f"❌ Ошибка запроса: {str(e)[:50]}"
 
         user_storage[m.chat.id] = content
 
+        # Формируем статистику
         stats_info = ""
-        if data_type == "🔗 Список ссылок (vless/vmess/...)":
+        if found_links:
             stats = {}
-            for c in configs:
+            for c in found_links:
                 proto = c.split('://')[0].upper()
                 stats[proto] = stats.get(proto, 0) + 1
-            stats_info = "\n".join([f"🔹 {k}: `{v}`" for k, v in stats.items()])
-            count_info = f"📊 Внутри найдено серверов: `{len(configs)}`"
-        else:
-            size_kb = len(content.encode('utf-8')) / 1024 if content else 0
-            count_info = f"📊 Размер контента: `{size_kb:.2f} KB`"
-
+            stats_info = "\n" + "\n".join([f"🔹 {k}: `{v}`" for k, v in stats.items()])
+        
+        # Плашка обнаружения
+        json_status = f"📦 JSON-конфиги: `{len(found_jsons)} шт.`" if found_jsons else "📦 JSON-конфиги: `0`"
+        links_status = f"🔗 Ссылки: `{len(found_links)} шт.`"
+        
         report = (
             f"✅ **Готово!**\n\n"
-            f"🌐 **Тип контента:** `{data_type}`\n"
             f"🔗 **Ссылка на подписку:**\n"
             f"```\n{sub_link}\n```\n"
-            f"{count_info}\n"
+            f"{links_status}\n"
+            f"{json_status}\n"
             f"{stats_info}"
         )
         
@@ -129,7 +151,7 @@ def handle_message(m):
         
         bot.edit_message_text(report, m.chat.id, status_msg.message_id, parse_mode='Markdown', reply_markup=kb)
     else:
-        bot.edit_message_text("❌ Ошибка Sayori API (неверная ссылка?).", m.chat.id, status_msg.message_id)
+        bot.edit_message_text("❌ Ошибка Sayori API.", m.chat.id, status_msg.message_id)
 
 @bot.callback_query_handler(func=lambda c: c.data == "get_all")
 def get_all(call):
@@ -140,11 +162,7 @@ def get_all(call):
     
     is_json = content.strip().startswith('{') or content.strip().startswith('[')
     
-    if not is_json:
-        lines = [l.strip() for l in content.split('\n') if l.strip()]
-        content = "\n\n".join(lines)
-
-    if 0 < len(content) < 3500:
+    if len(content) < 3500:
         bot.send_message(call.message.chat.id, f"```\n{content}\n```", parse_mode='Markdown')
     else:
         ext = "json" if is_json else "txt"
