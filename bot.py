@@ -24,6 +24,8 @@ USER_AGENTS = [
 CONVERTER_URL = "https://cs12d7a.4pda.ws/34581412/V2RAY+Converter+fix25fix.html"
 
 def decrypt_via_api(happ_link):
+    # Пауза, чтобы не ловить 500 от API при спаме
+    time.sleep(random.uniform(0.5, 1.0))
     api_url = "https://api.sayori.cc/v1/decrypt"
     headers = {"Content-Type": "application/json", "x-api-key": SAYORI_KEY}
     payload = {"link": happ_link}
@@ -56,11 +58,13 @@ def extract_happ_anywhere(text_or_url):
     
     if text_or_url.startswith('http'):
         try:
+            # Небольшая пауза перед запросом к сайту
+            time.sleep(random.uniform(0.8, 1.5))
             h = {'User-Agent': random.choice(USER_AGENTS)}
-            # ВАЖНО: allow_redirects=False, чтобы не упасть на нестандартном протоколе
+            # allow_redirects=False нужен, чтобы поймать happ:// в заголовках (ecobuy)
             r = requests.get(text_or_url, headers=h, timeout=10, allow_redirects=False)
             
-            # Проверяем заголовки редиректа (для ecobuy)
+            # Проверяем заголовки редиректа
             loc = r.headers.get('Location', '')
             if 'happ://' in unquote(loc):
                 return unquote(loc)
@@ -81,7 +85,6 @@ def handle_message(m):
     target_link = extract_happ_anywhere(text)
     
     if not target_link:
-        # Если это просто прямая ссылка на raw github или файл, пробуем её
         if text.startswith('http'): target_link = text
         else:
             bot.reply_to(m, "❌ Ссылка не распознана.")
@@ -102,19 +105,21 @@ def fetch_and_report(chat_id, sub_url, message_id):
     error_code = None
     
     try:
+        # Пауза перед скачиванием файла
+        time.sleep(0.5)
         headers = {
             'User-Agent': random.choice(USER_AGENTS),
             'Accept-Encoding': 'gzip, deflate', 
             'Connection': 'keep-alive'
         }
-        # Для скачивания финального контента редиректы разрешаем
         res = requests.get(sub_url, headers=headers, timeout=15, allow_redirects=True)
         error_code = res.status_code
         
         if res.status_code == 200:
+            # Используем res.content для корректной работы с GitHub (gzip)
             content = res.content.decode('utf-8', errors='ignore').strip()
             
-            # Если это Base64 (старые подписки)
+            # Если это Base64
             if "://" not in content[:500] and "{" not in content[:100] and not content.startswith("#"):
                 try:
                     clean_raw = re.sub(r'[^a-zA-Z0-9+/=]', '', content)
@@ -128,14 +133,16 @@ def fetch_and_report(chat_id, sub_url, message_id):
 
     if not content or (isinstance(error_code, int) and error_code >= 400):
         kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton("🔑 Через API", callback_data="force_api"))
-        bot.edit_message_text(f"❌ Ошибка (Код: {error_code})", chat_id, message_id, reply_markup=kb)
+        kb.add(types.InlineKeyboardButton("🔄 Повторить", callback_data="force_api"))
+        bot.edit_message_text(f"❌ Ошибка (Код: {error_code})\nПопробуйте ещё раз через секунду.", 
+                              chat_id, message_id, reply_markup=kb)
         return
 
     user_storage[chat_id] = content
+    # Улучшенная регулярка (жадная, берет всю ссылку)
     links = re.findall(r'(?:vless|vmess|ss|trojan|shadowsocks|tuic|hysteria2?)://[^\r\n"\'<>]+', content)
     
-    # ПРОВЕРКА ТИПА: Атланта или JSON
+    # ПРОВЕРКА ТИПА
     is_atlanta = "atlanta-subs" in sub_url
     has_json_struct = '"outbounds"' in content or '"nodes"' in content
     
@@ -157,8 +164,9 @@ def fetch_and_report(chat_id, sub_url, message_id):
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("📥 Скачать файл", callback_data="get_all"))
     kb.add(types.InlineKeyboardButton("🔄 Через API", callback_data="force_api"))
-    bot.edit_message_text(report, chat_id, message_id, parse_mode='Markdown', reply_markup=kb, disable_web_page_preview=True)
     
+    bot.edit_message_text(report, chat_id, message_id, parse_mode='Markdown', reply_markup=kb, disable_web_page_preview=True)
+
 @bot.callback_query_handler(func=lambda c: c.data == "get_all")
 def get_all(call):
     content = user_storage.get(call.message.chat.id)
