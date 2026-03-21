@@ -22,7 +22,29 @@ USER_AGENTS = [
 
 CONVERTER_URL = "https://cs12d7a.4pda.ws/34581412/V2RAY+Converter+fix25fix.html"
 
-# --- БЛОК ЛОГИКИ ПАРСИНГА ---
+# --- НОВЫЕ ФУНКЦИИ ПАРСИНГА ---
+
+def universal_search(html_text):
+    """Ищет happ:// или прямые конфиги в HTML коде (view-source)"""
+    # 1. Ищем happ ссылки (включая закодированные в URL)
+    decoded_html = unquote(html_text)
+    happ_match = re.search(r'happ://(crypt\d?)/[^\s"\'<>]+', decoded_html)
+    if happ_match:
+        return happ_match.group(0), happ_match.group(1)
+    
+    # 2. Ищем JSON конфиги Атланты в мета-тегах
+    try:
+        match = re.search(r'data-panel="([^"]+)"', html_text)
+        if match:
+            decoded = base64.b64decode(match.group(1)).decode('utf-8')
+            data = json.loads(decoded)
+            url = data.get("response", {}).get("subscriptionUrl")
+            if url: return url, None
+    except: pass
+    
+    return None, None
+
+# --- СТАРЫЕ ФУНКЦИИ (БЕЗ ИЗМЕНЕНИЙ ЛОГИКИ) ---
 
 def decrypt_via_api(happ_link):
     api_url = "https://api.sayori.cc/v1/decrypt"
@@ -32,117 +54,108 @@ def decrypt_via_api(happ_link):
         res = requests.post(api_url, json=payload, headers=headers, timeout=15)
         if res.status_code == 200:
             data = res.json()
-            return data.get("result") if data.get("success") else None
+            if data.get("success"):
+                return data.get("result")
     except Exception as e:
         print(f"Decrypt Error: {e}")
     return None
 
-def universal_parser(html_text):
-    """Ищет happ://, прокси-ссылки и скрытый Base64/JSON в HTML"""
-    found = []
-    
-    # 1. Прямые ссылки на протоколы
-    found.extend(re.findall(r'(?:vless|vmess|ss|trojan|shadowsocks|tuic|hysteria2?)://[^\r\n"\'<>#\s]+', html_text))
-    
-    # 2. Скрытые happ://
-    happ_matches = re.findall(r'happ://crypt\d?/[^\s"\'<>]+', html_text)
-    found.extend(happ_matches)
-
-    # 3. Поиск в Base64 (часто для Атланты и JS-скриптов)
-    potential_b64 = re.findall(r'data-[a-z]+="([A-Za-z0-9+/=]{50,})"', html_text)
-    potential_b64.extend(re.findall(r'["\']([A-Za-z0-9+/=]{100,})["\']', html_text)) # Длинные строки в коде
-    
-    for b64_str in potential_b64:
-        try:
-            decoded = base64.b64decode(b64_str).decode('utf-8', errors='ignore')
-            # Ищем внутри декодированного
-            inner_happ = re.search(r'happ://crypt\d?/[^\s"\'<>]+', decoded)
-            if inner_happ: found.append(inner_happ.group(0))
-            
-            if '"subscriptionUrl"' in decoded:
-                data = json.loads(decoded)
-                url = data.get("response", {}).get("subscriptionUrl") or data.get("subscriptionUrl")
-                if url: found.append(url)
-        except: continue
-
-    return list(set(found))
-
-# --- ОСНОВНАЯ ЦЕПОЧКА ОБРАБОТКИ ---
+def extract_happ(text):
+    decoded = unquote(text)
+    match = re.search(r'happ://(crypt\d?)/[^\s"\'<>]+', decoded)
+    if match:
+        return match.group(0), match.group(1)
+    return None, None
 
 @bot.message_handler(func=lambda m: True)
 def handle_message(m):
     text = m.text.strip()
     if text.startswith('/'): return
 
-    # Проверка на happ или http
-    match_happ = re.search(r'happ://crypt\d?/[^\s"\'<>]+', unquote(text))
-    target = match_happ.group(0) if match_happ else (text if text.startswith('http') else None)
+    # Проверяем на наличие happ прямо в тексте (старая логика)
+    happ_link, crypt_ver = extract_happ(text)
+    target_url = happ_link if happ_link else (text if text.startswith('http') else None)
 
-    if not target:
+    if not target_url:
         bot.reply_to(m, "❌ Ссылка не распознана.")
         return
 
-    status_msg = bot.reply_to(m, "⏳ **Глубокий анализ...**", parse_mode='Markdown')
-    # Запускаем рекурсивный процесс
-    success = deep_process(m.chat.id, target, status_msg.message_id)
-    
-    if not success:
-        bot.edit_message_text("❌ Не удалось извлечь данные. Возможно, ссылка защищена или пуста.", m.chat.id, status_msg.message_id)
+    status_msg = bot.reply_to(m, "⏳ **Обработка...**", parse_mode='Markdown')
+    process_link(m.chat.id, target_url, status_msg.message_id, crypt_ver)
 
-def deep_process(chat_id, current_url, message_id, depth=0):
-    if depth > 3: return False # Ограничение вложенности
+def process_link(chat_id, target_url, message_id, crypt_ver=None):
+    # Если это НЕ happ://, пробуем заглянуть внутрь страницы (view-source)
+    if not target_url.startswith('happ://'):
+        try:
+            # Используем прокси для первичного осмотра страницы
+            proxy_view = f"https://s.sayori.cc/{target_url}"
+            res = requests.get(proxy_view, headers={'User-Agent': random.choice(USER_AGENTS)}, timeout=10)
+            
+            # Ищем скрытый happ или прямую ссылку на подписку
+            found_url, found_ver = universal_search(res.text)
+            if found_url:
+                target_url = found_url
+                crypt_ver = found_ver
+        except:
+            pass
+
+    # Далее стандартный чекер
+    final_url = target_url
+    if target_url.startswith('happ://'):
+        decrypted = decrypt_via_api(target_url)
+        if not decrypted:
+            bot.edit_message_text("❌ Ошибка: Не удалось расшифровать ссылку через API.", chat_id, message_id)
+            return
+        final_url = decrypted
+
+    proxy_url = f"https://s.sayori.cc/{final_url}" if final_url.startswith('http') else final_url
     
+    if chat_id not in user_storage: user_storage[chat_id] = {}
+    user_storage[chat_id]['last_url'] = target_url
+    user_storage[chat_id]['crypt_ver'] = crypt_ver
+
+    fetch_and_report(chat_id, final_url, proxy_url, message_id)
+
+def fetch_and_report(chat_id, original_url, proxy_url, message_id):
+    content = ""
+    error_code = None
+    
+    for url_to_try in [proxy_url, original_url]:
+        try:
+            headers = {'User-Agent': random.choice(USER_AGENTS)}
+            res = requests.get(url_to_try, headers=headers, timeout=15)
+            if res.status_code == 200 and len(res.text) > 10:
+                content = res.text.strip()
+                break
+            error_code = res.status_code
+        except:
+            error_code = "Timeout"
+
+    if not content:
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("🔄 Повторить", callback_data="retry_last"))
+        bot.edit_message_text(f"❌ Ошибка загрузки (Код: {error_code})\n\nСервер недоступен. Попробуйте нажать повтор.", 
+                              chat_id, message_id, reply_markup=kb)
+        return
+
+    final_data = content
     try:
-        # 1. Если это happ — дешифруем сразу
-        if current_url.startswith('happ://'):
-            decrypted = decrypt_via_api(current_url)
-            if decrypted:
-                return deep_process(chat_id, decrypted, message_id, depth + 1)
-            return False
+        if "://" not in content[:50] and "{" not in content[:20]:
+            decoded = base64.b64decode(content).decode('utf-8', errors='ignore')
+            if "://" in decoded or "{" in decoded: final_data = decoded
+    except: pass
 
-        # 2. Если это HTTP — идем на сайт через прокси Sayori (view-source режим)
-        proxy_url = f"https://s.sayori.cc/{current_url}"
-        headers = {'User-Agent': random.choice(USER_AGENTS)}
-        res = requests.get(proxy_url, headers=headers, timeout=15)
-        
-        if res.status_code != 200:
-            # Пробуем без прокси, если прокси упал
-            res = requests.get(current_url, headers=headers, timeout=15)
-            
-        html = res.text
-        links = universal_parser(html)
-        
-        # Если нашли прямые прокси (vless и т.д.)
-        proxy_links = [l for l in links if '://' in l and not l.startswith(('http', 'happ'))]
-        if proxy_links:
-            report_success(chat_id, current_url, proxy_links, html, message_id)
-            return True
-            
-        # Если нашли новый happ внутри кода — идем глубже
-        happ_links = [l for l in links if l.startswith('happ://')]
-        if happ_links:
-            return deep_process(chat_id, happ_links[0], message_id, depth + 1)
-
-        # Если нашли подписку (другой http) — идем по ней один раз
-        http_links = [l for l in links if l.startswith('http') and l != current_url]
-        if http_links and depth == 0:
-             return deep_process(chat_id, http_links[0], message_id, depth + 1)
-
-    except Exception as e:
-        print(f"Error at depth {depth}: {e}")
-    return False
-
-def report_success(chat_id, final_url, nodes, raw_content, message_id):
-    user_storage[chat_id] = {'content': raw_content, 'last_url': final_url}
+    user_storage[chat_id]['content'] = final_data
+    links = re.findall(r'(?:vless|vmess|ss|trojan|shadowsocks|tuic|hysteria2?)://[^\r\n"\'<>#]+', final_data)
     
-    proxy_url = f"https://s.sayori.cc/{final_url}"
+    crypt_info = f"🔑 Ключ: `{user_storage[chat_id].get('crypt_ver', 'auto')}`\n" if user_storage[chat_id].get('crypt_ver') else ""
     
     report = (
-        f"✅ **Глубокий анализ завершен**\n\n"
-        f"📊 Найдено узлов: `{len(nodes)}` шт.\n"
-        f"🌐 **Финальный URL:**\n`{final_url[:60]}...`\n\n"
-        f"🚀 **Прокси-ссылка:**\n`{proxy_url}`\n\n"
-        f"⚠️ Используйте [конвертер]({CONVERTER_URL})."
+        f"✅ **Обработано успешно**\n"
+        f"{crypt_info}\n"
+        f"🔗 **Результат (исходный):**\n`{original_url}`\n\n"
+        f"🌐 **Прокси-ссылка:**\n`{proxy_url}`\n\n"
+        f"📊 Найдено узлов: `{len(links)}`"
     )
     
     kb = types.InlineKeyboardMarkup()
@@ -151,26 +164,26 @@ def report_success(chat_id, final_url, nodes, raw_content, message_id):
     
     bot.edit_message_text(report, chat_id, message_id, parse_mode='Markdown', reply_markup=kb, disable_web_page_preview=True)
 
-# --- CALLBACKS ---
-
 @bot.callback_query_handler(func=lambda c: True)
 def callback_handler(call):
     chat_id = call.message.chat.id
     if call.data == "get_all":
         data = user_storage.get(chat_id, {}).get('content')
-        if not data: return
+        if not data:
+            bot.answer_callback_query(call.id, "Данные устарели.")
+            return
         
-        ext = "json" if '"outbounds"' in data or '"nodes"' in data else "txt"
+        ext = "json" if '"outbounds"' in data else "txt"
         file_name = f"config_{chat_id}.{ext}"
         with open(file_name, "w", encoding="utf-8") as f: f.write(data)
         with open(file_name, "rb") as f:
-            bot.send_document(chat_id, f, caption="📄 Результат анализа")
+            bot.send_document(chat_id, f, caption="📄 Ваш конфиг")
         os.remove(file_name)
-        
     elif call.data == "retry_last":
-        url = user_storage.get(chat_id, {}).get('last_url')
-        if url:
+        last_url = user_storage.get(chat_id, {}).get('last_url')
+        crypt_ver = user_storage.get(chat_id, {}).get('crypt_ver')
+        if last_url:
             bot.answer_callback_query(call.id, "Обновляю...")
-            deep_process(chat_id, url, call.message.message_id)
+            process_link(chat_id, last_url, call.message.message_id, crypt_ver)
 
 bot.polling(none_stop=True)
