@@ -105,42 +105,62 @@ def fetch_and_report(chat_id, sub_url, message_id):
     error_code = None
     
     try:
-        # Пауза перед скачиванием файла
-        time.sleep(0.5)
+        # Увеличиваем паузу, чтобы имитировать чтение страницы человеком
+        time.sleep(random.uniform(1.5, 3.0)) 
+        
         headers = {
-            'User-Agent': random.choice(USER_AGENTS),
-            'Accept-Encoding': 'gzip, deflate', 
-            'Connection': 'keep-alive'
+            # Используем только один, максимально похожий на браузер UA
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'ru-RU,ru;q=0.8,en-US;q=0.5,en;q=0.3',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
         }
-        res = requests.get(sub_url, headers=headers, timeout=15, allow_redirects=True)
+        
+        # Важно: verify=True (по умолчанию) и таймаут побольше
+        res = requests.get(sub_url, headers=headers, timeout=25, allow_redirects=True)
         error_code = res.status_code
         
         if res.status_code == 200:
-            # Используем res.content для корректной работы с GitHub (gzip)
-            content = res.content.decode('utf-8', errors='ignore').strip()
+            # .text автоматически обрабатывает кодировку и сжатие
+            content = res.text.strip()
             
-            # Если это Base64
-            if "://" not in content[:500] and "{" not in content[:100] and not content.startswith("#"):
-                try:
-                    clean_raw = re.sub(r'[^a-zA-Z0-9+/=]', '', content)
-                    if len(clean_raw) > 30:
-                        decoded = base64.b64decode(clean_raw).decode('utf-8', errors='ignore')
-                        if '://' in decoded or '{' in decoded:
-                            content = decoded
-                except: pass
-    except Exception as e:
-        error_code = str(e)[:20]
+            # Если контент пустой или подозрительно короткий (ошибка провайдера)
+            if len(content) < 10:
+                error_code = "Empty Response"
+                content = ""
+        else:
+            # Если получили 500 или 403, пробуем еще раз с другим UA через рекурсию (опционально)
+            pass
 
+    except Exception as e:
+        error_code = f"Err: {str(e)[:15]}"
+
+    # Проверка на успешность получения данных
     if not content or (isinstance(error_code, int) and error_code >= 400):
         kb = types.InlineKeyboardMarkup()
         kb.add(types.InlineKeyboardButton("🔄 Повторить", callback_data="force_api"))
-        bot.edit_message_text(f"❌ Ошибка (Код: {error_code})\nПопробуйте ещё раз через секунду.", 
+        bot.edit_message_text(f"❌ Сервер временно недоступен (Код: {error_code})\n"
+                              f"Попробуйте нажать «Повторить» через 5-10 секунд.", 
                               chat_id, message_id, reply_markup=kb)
         return
 
-    user_storage[chat_id] = content
-    # Улучшенная регулярка (жадная, берет всю ссылку)
-    links = re.findall(r'(?:vless|vmess|ss|trojan|shadowsocks|tuic|hysteria2?)://[^\r\n"\'<>]+', content)
+    # Обработка Base64 (если контент зашифрован)
+    final_data = content
+    try:
+        # Проверка: если нет признаков открытого текста, пробуем base64
+        if "://" not in content[:100] and "{" not in content[:50]:
+            clean_raw = re.sub(r'[^a-zA-Z0-9+/=]', '', content)
+            decoded = base64.b64decode(clean_raw).decode('utf-8', errors='ignore')
+            if "://" in decoded or "{" in decoded:
+                final_data = decoded
+    except:
+        pass
+
+    user_storage[chat_id] = final_data
+    
+    # Поиск ссылок (VLESS, VMESS и т.д.)
+    links = re.findall(r'(?:vless|vmess|ss|trojan|shadowsocks|tuic|hysteria2?)://[^\r\n"\'<>]+', final_data)
     
     # ПРОВЕРКА ТИПА
     is_atlanta = "atlanta-subs" in sub_url
