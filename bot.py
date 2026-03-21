@@ -117,6 +117,7 @@ def fetch_and_report(chat_id, original_url, proxy_url, message_id):
     content = ""
     error_code = None
     
+    # 1. Загрузка данных
     for url_to_try in [proxy_url, original_url]:
         try:
             headers = {'User-Agent': random.choice(USER_AGENTS)}
@@ -131,39 +132,60 @@ def fetch_and_report(chat_id, original_url, proxy_url, message_id):
     if not content:
         kb = types.InlineKeyboardMarkup()
         kb.add(types.InlineKeyboardButton("🔄 Повторить", callback_data="retry_last"))
-        bot.edit_message_text(f"❌ Ошибка загрузки (Код: {error_code})\n\nКонтент не найден. Возможно, это страница-заглушка.", 
+        bot.edit_message_text(f"❌ Ошибка загрузки (Код: {error_code})\n\nСервер недоступен.", 
                               chat_id, message_id, reply_markup=kb)
         return
 
-    # Base64 Check
+    # 2. ДЕКОДИРОВАНИЕ (превращаем Base64 в читаемый текст ДО подсчета)
     final_data = content
+    is_base64_encoded = False
+    
     try:
-        # Проверка: если контент не похож на конфиг, пробуем декодировать b64
-        if "://" not in content[:50] and "{" not in content[:20]:
-            decoded = base64.b64decode(content).decode('utf-8', errors='ignore')
-            if "://" in decoded or "{" in decoded: final_data = decoded
-    except: pass
+        # Если в тексте нет стандартных разделителей протоколов, пробуем Base64
+        if "://" not in content[:100] and "{" not in content[:50]:
+            # Убираем лишние пробелы/переносы для корректного b64
+            clean_b64 = re.sub(r'[^a-zA-Z0-9+/=]', '', content)
+            decoded = base64.b64decode(clean_b64).decode('utf-8', errors='ignore')
+            if "://" in decoded or "{" in decoded:
+                final_data = decoded
+                is_base64_encoded = True
+    except:
+        pass
 
+    # Сохраняем финальный (чистый) результат
     user_storage[chat_id]['content'] = final_data
-    links = re.findall(r'(?:vless|vmess|ss|trojan|shadowsocks|tuic|hysteria2?)://[^\r\n"\'<>#]+', final_data)
+
+    # 3. АНАЛИЗ (теперь считаем узлы в уже расшифрованном тексте)
+    links = re.findall(r'(?:vless|vmess|ss|trojan|shadowsocks|tuic|hysteria2?)://[^\r\n"\'<>#\s]+', final_data)
     
-    # Инфо о типе ключа
-    crypt_type = user_storage[chat_id].get('crypt_ver') or "direct/web"
-    crypt_info = f"🔑 Тип: `{crypt_type}`\n"
+    # Определяем формат для красивого отчета
+    if '"outbounds"' in final_data or '"nodes"' in final_data:
+        format_type = "🛠 JSON Config"
+    elif is_base64_encoded:
+        format_type = "📦 Base64 Subscription"
+    elif links:
+        format_type = "🔗 Plain Text List"
+    else:
+        format_type = "📄 Unknown/Raw Text"
+
+    crypt_info = f"🔑 Ключ: `{user_storage[chat_id].get('crypt_ver', 'auto')}`\n" if user_storage[chat_id].get('crypt_ver') else ""
     
+    # 4. ФИНАЛЬНЫЙ ОТЧЕТ
     report = (
-        f"✅ **Данные получены**\n"
-        f"{crypt_info}\n"
-        f"🔗 **Источник:**\n`{original_url}`\n\n"
-        f"🌐 **Прокси:**\n`{proxy_url}`\n\n"
-        f"📊 Найдено узлов: `{len(links)}`"
+        f"✅ **Обработано успешно**\n"
+        f"{crypt_info}"
+        f"📂 **Формат:** `{format_type}`\n"
+        f"📊 **Найдено узлов:** `{len(links)}` шт.\n\n"
+        f"🔗 **Ссылка-источник:**\n`{original_url[:60]}...`\n\n"
+        f"🌐 **Прокси-зеркало:**\n`{proxy_url[:60]}...`"
     )
     
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("📥 Скачать файл", callback_data="get_all"))
     kb.add(types.InlineKeyboardButton("🔄 Обновить", callback_data="retry_last"))
     
-    bot.edit_message_text(report, chat_id, message_id, parse_mode='Markdown', reply_markup=kb, disable_web_page_preview=True)
+    bot.edit_message_text(report, chat_id, message_id, parse_mode='Markdown', 
+                          reply_markup=kb, disable_web_page_preview=True)
 
 @bot.callback_query_handler(func=lambda c: True)
 def callback_handler(call):
