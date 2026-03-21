@@ -24,31 +24,15 @@ USER_AGENTS = [
 CONVERTER_URL = "https://cs12d7a.4pda.ws/34581412/V2RAY+Converter+fix25fix.html"
 
 def decrypt_via_api(happ_link):
-    """Улучшенная расшифровка с защитой от 500 ошибки."""
     api_url = "https://api.sayori.cc/v1/decrypt"
     headers = {"Content-Type": "application/json", "x-api-key": SAYORI_KEY}
-    payload = {"link": happ_link.strip()}
-    
-    # Для длинных crypt3 ссылок увеличиваем количество попыток
-    max_attempts = 3
-    for attempt in range(max_attempts):
-        try:
-            # Увеличиваем таймаут, crypt3 может расшифровываться долго
-            res = requests.post(api_url, json=payload, headers=headers, timeout=25)
-            
-            if res.status_code == 200:
-                data = res.json()
-                if data.get("success"):
-                    return data.get("result")
-            
-            # Если Sayori выдал 500, ждем и пробуем снова
-            if res.status_code == 500:
-                time.sleep(attempt + 2) 
-                continue
-                
-        except Exception:
-            time.sleep(1)
-            continue
+    payload = {"link": happ_link}
+    try:
+        res = requests.post(api_url, json=payload, headers=headers, timeout=15)
+        if res.status_code == 200:
+            d = res.json()
+            return d.get("result") if d.get("success") else None
+    except: pass
     return None
 
 def extract_from_atlanta_meta(html_text):
@@ -65,25 +49,16 @@ def extract_from_atlanta_meta(html_text):
 def extract_happ_anywhere(text_or_url):
     """Ищет happ:// или вытягивает URL из метаданных страницы"""
     decoded_raw = unquote(text_or_url)
-    
-    # 1. Если happ:// уже в тексте
     match = re.search(r'happ://crypt\d/[^\s"\'<>]+', decoded_raw)
     if match: return match.group(0)
     
     if text_or_url.startswith('http'):
         try:
-            # Небольшая пауза перед запросом к сайту
-            time.sleep(random.uniform(0.8, 1.5))
+            time.sleep(random.uniform(1.0, 2.0))
             h = {'User-Agent': random.choice(USER_AGENTS)}
-            # allow_redirects=False нужен, чтобы поймать happ:// в заголовках (ecobuy)
-            r = requests.get(text_or_url, headers=h, timeout=10, allow_redirects=False)
+            r = requests.get(text_or_url, headers=h, timeout=10)
             
-            # Проверяем заголовки редиректа
-            loc = r.headers.get('Location', '')
-            if 'happ://' in unquote(loc):
-                return unquote(loc)
-
-            # Проверка на Атланту в теле страницы
+            # Проверка на Атланту
             atlanta_sub = extract_from_atlanta_meta(r.text)
             if atlanta_sub: return atlanta_sub
             
@@ -96,33 +71,23 @@ def extract_happ_anywhere(text_or_url):
 @bot.message_handler(func=lambda m: True)
 def handle_message(m):
     text = m.text.strip()
-    
-    # 1. Сначала ищем саму ссылку happ://
     target_link = extract_happ_anywhere(text)
     
     if not target_link:
+        # Если это просто прямая ссылка на raw github или файл, пробуем её
         if text.startswith('http'): target_link = text
         else:
             bot.reply_to(m, "❌ Ссылка не распознана.")
             return
 
-    status_msg = bot.reply_to(m, "⏳ *Расшифровка Sayori...*", parse_mode='Markdown')
+    status_msg = bot.reply_to(m, "⏳ *Обработка...*", parse_mode='Markdown')
     
-    final_url = None
     if target_link.startswith('happ://'):
-        # Пытаемся расшифровать
-        final_url = decrypt_via_api(target_link)
-        
-        if not final_url:
-            bot.edit_message_text("❌ Sayori API не справился с этой ссылкой (Ошибка 500).\n"
-                                  "Возможно, ссылка слишком длинная или API перегружен.", 
-                                  m.chat.id, status_msg.message_id)
-            return
+        decrypted = decrypt_via_api(target_link)
+        final_url = decrypted if decrypted else target_link
     else:
         final_url = target_link
     
-    # Если расшифровка прошла успешно, идем качать сам конфиг
-    bot.edit_message_text("⏳ *Загрузка конфигурации...*", m.chat.id, status_msg.message_id, parse_mode='Markdown')
     fetch_and_report(m.chat.id, final_url, status_msg.message_id)
 
 def fetch_and_report(chat_id, sub_url, message_id):
@@ -130,71 +95,40 @@ def fetch_and_report(chat_id, sub_url, message_id):
     error_code = None
     
     try:
-        # Увеличиваем паузу, чтобы имитировать чтение страницы человеком
-        time.sleep(random.uniform(1.5, 3.0)) 
-        
-        headers = {
-            # Используем только один, максимально похожий на браузер UA
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-            'Accept-Language': 'ru-RU,ru;q=0.8,en-US;q=0.5,en;q=0.3',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1'
-        }
-        
-        # Важно: verify=True (по умолчанию) и таймаут побольше
-        res = requests.get(sub_url, headers=headers, timeout=25, allow_redirects=True)
+        headers = {'User-Agent': random.choice(USER_AGENTS)}
+        res = requests.get(sub_url, headers=headers, timeout=15)
         error_code = res.status_code
         
         if res.status_code == 200:
-            # .text автоматически обрабатывает кодировку и сжатие
-            content = res.text.strip()
-            
-            # Если контент пустой или подозрительно короткий (ошибка провайдера)
-            if len(content) < 10:
-                error_code = "Empty Response"
-                content = ""
-        else:
-            # Если получили 500 или 403, пробуем еще раз с другим UA через рекурсию (опционально)
-            pass
+            raw = res.text.strip()
+            # Проверка на Base64 (стандарт для многих подписок)
+            try:
+                clean_raw = re.sub(r'[^a-zA-Z0-9+/=]', '', raw)
+                if len(clean_raw) > 30:
+                    decoded = base64.b64decode(clean_raw).decode('utf-8', errors='ignore')
+                    content = decoded if '://' in decoded or '{' in decoded else raw
+                else: content = raw
+            except: content = raw
+    except Exception as e: error_code = str(e)[:20]
 
-    except Exception as e:
-        error_code = f"Err: {str(e)[:15]}"
-
-    # Проверка на успешность получения данных
     if not content or (isinstance(error_code, int) and error_code >= 400):
         kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton("🔄 Повторить", callback_data="force_api"))
-        bot.edit_message_text(f"❌ Сервер временно недоступен (Код: {error_code})\n"
-                              f"Попробуйте нажать «Повторить» через 5-10 секунд.", 
-                              chat_id, message_id, reply_markup=kb)
+        kb.add(types.InlineKeyboardButton("🔑 API принудительно", callback_data="force_api"))
+        bot.edit_message_text(f"❌ Ошибка: {error_code}", chat_id, message_id, reply_markup=kb)
         return
 
-    # Обработка Base64 (если контент зашифрован)
-    final_data = content
-    try:
-        # Проверка: если нет признаков открытого текста, пробуем base64
-        if "://" not in content[:100] and "{" not in content[:50]:
-            clean_raw = re.sub(r'[^a-zA-Z0-9+/=]', '', content)
-            decoded = base64.b64decode(clean_raw).decode('utf-8', errors='ignore')
-            if "://" in decoded or "{" in decoded:
-                final_data = decoded
-    except:
-        pass
-
-    user_storage[chat_id] = final_data
+    user_storage[chat_id] = content
     
-    # Поиск ссылок (VLESS, VMESS и т.д.)
-    links = re.findall(r'(?:vless|vmess|ss|trojan|shadowsocks|tuic|hysteria2?)://[^\r\n"\'<>]+', final_data)
+    # Регулярка для поиска ЛЮБЫХ прокси-ссылок в тексте
+    links = re.findall(r'(vless|vmess|ss|trojan|shadowsocks|tuic|hysteria2?)://[^\s"\'<>]+', content)
     
-    # ПРОВЕРКА ТИПА
-    is_atlanta = "atlanta-subs" in sub_url
-    has_json_struct = '"outbounds"' in content or '"nodes"' in content
+    # Проверка на JSON структуру
+    has_json = '"outbounds"' in content or ('{' in content and '"' in content)
     
-    if is_atlanta or has_json_struct:
+    if links:
+        status_text = "ℹ️ Текстовая подписка" + (" (+ JSON)" if has_json else "")
+    elif has_json:
         status_text = "✅ JSON Конфигурация"
-    elif links:
-        status_text = "ℹ️ Текстовая подписка"
     else:
         status_text = "📄 Текстовый файл"
 
@@ -203,7 +137,7 @@ def fetch_and_report(chat_id, sub_url, message_id):
         f"🌐 **Тип:** `{status_text}`\n"
         f"🔗 **Найдено ссылок:** `{len(links)}` шт.\n\n"
         f"🔗 **Линк:**\n`{sub_url}`\n\n"
-        f"⚠️ **P.S.** Используйте [конвертер]({CONVERTER_URL})."
+        f"⚠️ **P.S.** Используйте [конвертер]({CONVERTER_URL}), если формат не подошел."
     )
     
     kb = types.InlineKeyboardMarkup()
