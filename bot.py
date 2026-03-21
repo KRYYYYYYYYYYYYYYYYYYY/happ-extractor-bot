@@ -4,7 +4,6 @@ import requests
 import re
 import base64
 import random
-import time
 import json
 from urllib.parse import unquote
 from telebot import types
@@ -20,19 +19,13 @@ USER_AGENTS = [
     'v2rayNG/1.8.5 (com.v2ray.ang; build 100805; Android 13)'
 ]
 
-CONVERTER_URL = "https://cs12d7a.4pda.ws/34581412/V2RAY+Converter+fix25fix.html"
-
-# --- НОВЫЕ ФУНКЦИИ ПАРСИНГА ---
-
 def universal_search(html_text):
-    """Ищет happ:// или прямые конфиги в HTML коде (view-source)"""
-    # 1. Ищем happ ссылки (включая закодированные в URL)
+    """Ищет happ:// или прямые конфиги в HTML"""
     decoded_html = unquote(html_text)
     happ_match = re.search(r'happ://(crypt\d?)/[^\s"\'<>]+', decoded_html)
     if happ_match:
         return happ_match.group(0), happ_match.group(1)
     
-    # 2. Ищем JSON конфиги Атланты в мета-тегах
     try:
         match = re.search(r'data-panel="([^"]+)"', html_text)
         if match:
@@ -44,8 +37,6 @@ def universal_search(html_text):
     
     return None, None
 
-# --- СТАРЫЕ ФУНКЦИИ (БЕЗ ИЗМЕНЕНИЙ ЛОГИКИ) ---
-
 def decrypt_via_api(happ_link):
     api_url = "https://api.sayori.cc/v1/decrypt"
     headers = {"Content-Type": "application/json", "x-api-key": SAYORI_KEY}
@@ -56,110 +47,84 @@ def decrypt_via_api(happ_link):
             data = res.json()
             if data.get("success"):
                 return data.get("result")
-    except Exception as e:
-        print(f"Decrypt Error: {e}")
+    except: pass
     return None
 
-def extract_happ(text):
-    decoded = unquote(text)
-    match = re.search(r'happ://(crypt\d?)/[^\s"\'<>]+', decoded)
-    if match:
-        return match.group(0), match.group(1)
+def get_content(url):
+    """Пытается загрузить контент напрямую или через прокси"""
+    proxy_url = f"https://s.sayori.cc/{url}" if url.startswith('http') else url
+    for target in [proxy_url, url]:
+        try:
+            res = requests.get(target, headers={'User-Agent': random.choice(USER_AGENTS)}, timeout=10)
+            if res.status_code == 200 and len(res.text) > 10:
+                return res.text.strip(), target
+        except: continue
     return None, None
 
 @bot.message_handler(func=lambda m: True)
 def handle_message(m):
     text = m.text.strip()
     if text.startswith('/'): return
+    
+    status_msg = bot.reply_to(m, "⏳ **Анализирую матрешку...**", parse_mode='Markdown')
+    process_recursive(m.chat.id, text, status_msg.message_id)
 
-    # Проверяем на наличие happ прямо в тексте (старая логика)
-    happ_link, crypt_ver = extract_happ(text)
-    target_url = happ_link if happ_link else (text if text.startswith('http') else None)
-
-    if not target_url:
-        bot.reply_to(m, "❌ Ссылка не распознана.")
+def process_recursive(chat_id, current_url, message_id, depth=0):
+    """
+    Главная функция: разворачивает ссылки, пока не найдет конфиги.
+    depth нужен, чтобы не уйти в бесконечный цикл.
+    """
+    if depth > 5:
+        bot.edit_message_text("❌ Слишком глубокая вложенность ссылок.", chat_id, message_id)
         return
 
-    status_msg = bot.reply_to(m, "⏳ **Обработка...**", parse_mode='Markdown')
-    process_link(m.chat.id, target_url, status_msg.message_id, crypt_ver)
-
-def process_link(chat_id, target_url, message_id, crypt_ver=None):
-    # Если это НЕ happ://, пробуем заглянуть внутрь страницы (view-source)
-    if not target_url.startswith('happ://'):
-        try:
-            # Используем прокси для первичного осмотра страницы
-            proxy_view = f"https://s.sayori.cc/{target_url}"
-            res = requests.get(proxy_view, headers={'User-Agent': random.choice(USER_AGENTS)}, timeout=10)
-            
-            # Ищем скрытый happ или прямую ссылку на подписку
-            found_url, found_ver = universal_search(res.text)
-            if found_url:
-                target_url = found_url
-                crypt_ver = found_ver
-        except:
-            pass
-
-    # Далее стандартный чекер
-    final_url = target_url
-    if target_url.startswith('happ://'):
-        decrypted = decrypt_via_api(target_url)
-        if not decrypted:
-            bot.edit_message_text("❌ Ошибка: Не удалось расшифровать ссылку через API.", chat_id, message_id)
+    # 1. Если это happ:// — сразу дешифруем
+    if current_url.startswith('happ://'):
+        decrypted = decrypt_via_api(current_url)
+        if decrypted:
+            return process_recursive(chat_id, decrypted, message_id, depth + 1)
+        else:
+            bot.edit_message_text("❌ Не удалось расшифровать happ ссылку.", chat_id, message_id)
             return
-        final_url = decrypted
 
-    proxy_url = f"https://s.sayori.cc/{final_url}" if final_url.startswith('http') else final_url
-    
-    if chat_id not in user_storage: user_storage[chat_id] = {}
-    user_storage[chat_id]['last_url'] = target_url
-    user_storage[chat_id]['crypt_ver'] = crypt_ver
-
-    fetch_and_report(chat_id, final_url, proxy_url, message_id)
-
-def fetch_and_report(chat_id, original_url, proxy_url, message_id):
-    content = ""
-    error_code = None
-    
-    for url_to_try in [proxy_url, original_url]:
-        try:
-            headers = {'User-Agent': random.choice(USER_AGENTS)}
-            res = requests.get(url_to_try, headers=headers, timeout=15)
-            if res.status_code == 200 and len(res.text) > 10:
-                content = res.text.strip()
-                break
-            error_code = res.status_code
-        except:
-            error_code = "Timeout"
-
-    if not content:
-        kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton("🔄 Повторить", callback_data="retry_last"))
-        bot.edit_message_text(f"❌ Ошибка загрузки (Код: {error_code})\n\nСервер недоступен. Попробуйте нажать повтор.", 
-                              chat_id, message_id, reply_markup=kb)
+    # 2. Загружаем контент по ссылке
+    raw_data, used_url = get_content(current_url)
+    if not raw_data:
+        bot.edit_message_text("❌ Не удалось получить данные по ссылке.", chat_id, message_id)
         return
 
-    final_data = content
+    # 3. Пытаемся понять, что внутри: HTML, Base64 или чистые конфиги
+    # Проверяем на HTML (поиск новых ссылок внутри)
+    found_link, _ = universal_search(raw_data)
+    if found_link:
+        return process_recursive(chat_id, found_link, message_id, depth + 1)
+
+    # Пробуем декодировать Base64 (часто подписки зашифрованы так)
+    final_content = raw_data
     try:
-        if "://" not in content[:50] and "{" not in content[:20]:
-            decoded = base64.b64decode(content).decode('utf-8', errors='ignore')
-            if "://" in decoded or "{" in decoded: final_data = decoded
+        if "://" not in raw_data[:50] and "{" not in raw_data[:20]:
+            decoded = base64.b64decode(raw_data).decode('utf-8', errors='ignore')
+            if "://" in decoded or "{" in decoded:
+                final_content = decoded
     except: pass
 
-    user_storage[chat_id]['content'] = final_data
-    links = re.findall(r'(?:vless|vmess|ss|trojan|shadowsocks|tuic|hysteria2?)://[^\r\n"\'<>#]+', final_data)
+    # 4. И вот ТЕПЕРЬ, когда мы максимально глубоко, считаем узлы
+    links = re.findall(r'(?:vless|vmess|ss|trojan|shadowsocks|tuic|hysteria2?)://[^\r\n"\'<>#]+', final_content)
     
-    crypt_info = f"🔑 Ключ: `{user_storage[chat_id].get('crypt_ver', 'auto')}`\n" if user_storage[chat_id].get('crypt_ver') else ""
-    
+    # Сохраняем для кнопки "Скачать"
+    if chat_id not in user_storage: user_storage[chat_id] = {}
+    user_storage[chat_id]['content'] = final_content
+    user_storage[chat_id]['last_url'] = current_url
+
+    # Формируем отчет
     report = (
-        f"✅ **Обработано успешно**\n"
-        f"{crypt_info}\n"
-        f"🔗 **Результат (исходный):**\n`{original_url}`\n\n"
-        f"🌐 **Прокси-ссылка:**\n`{proxy_url}`\n\n"
+        f"✅ **Обработка завершена**\n\n"
+        f"🌐 **Финальная ссылка:**\n`{current_url}`\n\n"
         f"📊 Найдено узлов: `{len(links)}`"
     )
     
     kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("📥 Скачать файл", callback_data="get_all"))
+    kb.add(types.InlineKeyboardButton("📥 Скачать конфиг", callback_data="get_all"))
     kb.add(types.InlineKeyboardButton("🔄 Обновить", callback_data="retry_last"))
     
     bot.edit_message_text(report, chat_id, message_id, parse_mode='Markdown', reply_markup=kb, disable_web_page_preview=True)
@@ -181,9 +146,8 @@ def callback_handler(call):
         os.remove(file_name)
     elif call.data == "retry_last":
         last_url = user_storage.get(chat_id, {}).get('last_url')
-        crypt_ver = user_storage.get(chat_id, {}).get('crypt_ver')
         if last_url:
             bot.answer_callback_query(call.id, "Обновляю...")
-            process_link(chat_id, last_url, call.message.message_id, crypt_ver)
+            process_recursive(chat_id, last_url, call.message.message_id)
 
 bot.polling(none_stop=True)
