@@ -8,6 +8,7 @@ import time
 import json
 from urllib.parse import unquote
 from telebot import types
+import cloudscraper 
 
 TOKEN = os.getenv('TELEGRAM_TOKEN')
 SAYORI_KEY = os.getenv('SAYORI_KEY')
@@ -120,50 +121,52 @@ def fetch_and_report(chat_id, original_url, proxy_url, message_id):
     content = ""
     error_code = None
     
-    # Цикл попыток загрузки
+    # Создаем "умный" сеанс, который умеет обходить Cloudflare
+    scraper = cloudscraper.create_scraper() 
+    
     for url_to_try in [proxy_url, original_url]:
         try:
             headers = {'User-Agent': random.choice(USER_AGENTS)}
-            res = requests.get(url_to_try, headers=headers, timeout=15)
+            # ЗАМЕНА: вместо requests.get используем scraper.get
+            res = scraper.get(url_to_try, headers=headers, timeout=15)
+            
             if res.status_code == 200 and len(res.text) > 10:
                 content = res.text.strip()
                 break
             error_code = res.status_code
-        except:
-            error_code = "Timeout"
+        except Exception as e:
+            error_code = f"Error: {str(e)[:20]}" # Записываем текст ошибки для отладки
 
     if not content:
         kb = types.InlineKeyboardMarkup()
         kb.add(types.InlineKeyboardButton("🔄 Повторить", callback_data="retry_last"))
-        bot.edit_message_text(f"❌ Ошибка загрузки (Код: {error_code})\n\nСервер недоступен.", 
-                             chat_id, message_id, reply_markup=kb)
+        bot.edit_message_text(f"❌ Ошибка загрузки (Код: {error_code})\n\nСервер недоступен или защищен. Попробуйте снова.", 
+                              chat_id, message_id, reply_markup=kb)
         return
 
-    # 1. Сначала подготавливаем данные (распаковываем "матрешку" Base64)
+    # --- Улучшенный блок декодирования ---
     final_data = content
     try:
-        # Если это не прямые ссылки и не JSON, пробуем декодировать Base64
-        if "://" not in content[:50] and "{" not in content[:20]:
-            decoded = base64.b64decode(content).decode('utf-8', errors='ignore')
-            if "://" in decoded or "{" in decoded: 
-                final_data = decoded
-    except: 
+        # Убираем все переносы и пробелы, которые ломают Base64
+        clean_b64 = "".join(content.split())
+        
+        # Пытаемся декодировать
+        decoded = base64.b64decode(clean_b64).decode('utf-8', errors='ignore')
+        
+        # Проверяем, есть ли в декодированном тексте признаки конфигов
+        protocols = ['vless://', 'vmess://', 'ss://', 'trojan://', 'hy2://', 'tuic://', '{']
+        if any(proto in decoded for proto in protocols):
+            final_data = decoded
+    except:
+        # Если это не Base64, оставляем исходный текст (final_data = content)
         pass
 
-    # Сохраняем финальный результат в память
     user_storage[chat_id]['content'] = final_data
-
-    # 2. ТЕПЕРЬ, когда всё расшифровано, считаем узлы
-    # Ищем стандартные протоколы
-    links = re.findall(r'(?:vless|vmess|ss|trojan|shadowsocks|tuic|hysteria2?)://[^\r\n"\'<>#]+', final_data)
     
-    # 3. Дополнительная проверка: если ссылок 0, но это валидный JSON (например, подписка Sing-box/Clash)
-    nodes_count = len(links)
-    if nodes_count == 0:
-        if '"outbounds"' in final_data or '"proxies"' in final_data:
-            # Если нашли признаки JSON конфига, считаем его за 1 полноценный узел (или структуру)
-            nodes_count = "JSON Config"
+    # Поиск ссылок с использованием \S+ (до первого пробела)
+    links = re.findall(r'(?:vless|vmess|ss|trojan|shadowsocks|tuic|hysteria2?)://\S+', final_data)
     
+    # --- Формирование отчета ---
     crypt_info = f"🔑 Ключ: `{user_storage[chat_id].get('crypt_ver', 'auto')}`\n" if user_storage[chat_id].get('crypt_ver') else ""
     
     report = (
@@ -171,7 +174,7 @@ def fetch_and_report(chat_id, original_url, proxy_url, message_id):
         f"{crypt_info}\n"
         f"🔗 **Результат (исходный):**\n`{original_url}`\n\n"
         f"🌐 **Прокси-ссылка:**\n`{proxy_url}`\n\n"
-        f"📊 Найдено узлов: `{nodes_count}`"
+        f"📊 Найдено узлов: `{len(links)}`"
     )
     
     kb = types.InlineKeyboardMarkup()
