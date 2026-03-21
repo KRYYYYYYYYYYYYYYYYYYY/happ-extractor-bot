@@ -116,41 +116,11 @@ def process_link(chat_id, target_url, message_id, crypt_ver=None):
 
     fetch_and_report(chat_id, final_url, proxy_url, message_id)
 
-def deep_extract_links(content):
-    """Рекурсивно разворачивает контент (Base64/JSON) и ищет прокси-ссылки."""
-    # 1. Пробуем найти ссылки в текущем тексте
-    links = re.findall(r'(?:vless|vmess|ss|trojan|shadowsocks|tuic|hysteria2?)://[^\s"\'<>#]+', content)
-    
-    if links:
-        return links, content
-
-    # 2. Если ссылок нет, проверяем, не Base64 ли это
-    try:
-        # Убираем лишние пробелы и проверяем на валидность base64
-        decoded = base64.b64decode(content.strip()).decode('utf-8', errors='ignore')
-        if "://" in decoded or "{" in decoded:
-            return deep_extract_links(decoded) # Рекурсия
-    except:
-        pass
-
-    # 3. Если не Base64, проверяем, не JSON ли это (подписки типа Clash/Sing-box)
-    try:
-        data = json.loads(content)
-        # Если это JSON, превращаем его в строку и ищем ссылки внутри (или возвращаем как есть)
-        json_str = json.dumps(data)
-        links = re.findall(r'(?:vless|vmess|ss|trojan|shadowsocks|tuic|hysteria2?)://[^\s"\'<>#]+', json_str)
-        if links:
-            return links, json_str
-    except:
-        pass
-
-    return [], content
-
 def fetch_and_report(chat_id, original_url, proxy_url, message_id):
     content = ""
     error_code = None
     
-    # 1. Загрузка данных
+    # Цикл попыток загрузки
     for url_to_try in [proxy_url, original_url]:
         try:
             headers = {'User-Agent': random.choice(USER_AGENTS)}
@@ -159,34 +129,49 @@ def fetch_and_report(chat_id, original_url, proxy_url, message_id):
                 content = res.text.strip()
                 break
             error_code = res.status_code
-        except Exception as e:
-            error_code = "Timeout/Error"
+        except:
+            error_code = "Timeout"
 
     if not content:
         kb = types.InlineKeyboardMarkup()
         kb.add(types.InlineKeyboardButton("🔄 Повторить", callback_data="retry_last"))
         bot.edit_message_text(f"❌ Ошибка загрузки (Код: {error_code})\n\nСервер недоступен.", 
-                              chat_id, message_id, reply_markup=kb)
+                             chat_id, message_id, reply_markup=kb)
         return
 
-    # 2. ГЛУБОКИЙ АНАЛИЗ (Решаем проблему "Матрешки")
-    # Теперь мы сначала полностью расшифровываем всё, что можно, а потом считаем.
-    found_links, final_data = deep_extract_links(content)
-    
+    # 1. Сначала подготавливаем данные (распаковываем "матрешку" Base64)
+    final_data = content
+    try:
+        # Если это не прямые ссылки и не JSON, пробуем декодировать Base64
+        if "://" not in content[:50] and "{" not in content[:20]:
+            decoded = base64.b64decode(content).decode('utf-8', errors='ignore')
+            if "://" in decoded or "{" in decoded: 
+                final_data = decoded
+    except: 
+        pass
+
+    # Сохраняем финальный результат в память
     user_storage[chat_id]['content'] = final_data
+
+    # 2. ТЕПЕРЬ, когда всё расшифровано, считаем узлы
+    # Ищем стандартные протоколы
+    links = re.findall(r'(?:vless|vmess|ss|trojan|shadowsocks|tuic|hysteria2?)://[^\r\n"\'<>#]+', final_data)
     
-    # 3. Формирование отчета
+    # 3. Дополнительная проверка: если ссылок 0, но это валидный JSON (например, подписка Sing-box/Clash)
+    nodes_count = len(links)
+    if nodes_count == 0:
+        if '"outbounds"' in final_data or '"proxies"' in final_data:
+            # Если нашли признаки JSON конфига, считаем его за 1 полноценный узел (или структуру)
+            nodes_count = "JSON Config"
+    
     crypt_info = f"🔑 Ключ: `{user_storage[chat_id].get('crypt_ver', 'auto')}`\n" if user_storage[chat_id].get('crypt_ver') else ""
-    
-    # Определяем тип контента для наглядности
-    content_type = "Base64/Encoded" if found_links and content != final_data else "Plain Text/JSON"
     
     report = (
         f"✅ **Обработано успешно**\n"
-        f"{crypt_info}"
-        f"📦 Тип данных: `{content_type}`\n\n"
+        f"{crypt_info}\n"
         f"🔗 **Результат (исходный):**\n`{original_url}`\n\n"
-        f"📊 Найдено узлов: `{len(found_links)}`"
+        f"🌐 **Прокси-ссылка:**\n`{proxy_url}`\n\n"
+        f"📊 Найдено узлов: `{nodes_count}`"
     )
     
     kb = types.InlineKeyboardMarkup()
