@@ -10,6 +10,7 @@ from urllib.parse import unquote
 from telebot import types
 import cloudscraper
 
+
 TOKEN = os.getenv('TELEGRAM_TOKEN')
 SAYORI_KEY = os.getenv('SAYORI_KEY')
 
