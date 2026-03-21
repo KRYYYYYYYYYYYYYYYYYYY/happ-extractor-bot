@@ -24,18 +24,22 @@ USER_AGENTS = [
 CONVERTER_URL = "https://cs12d7a.4pda.ws/34581412/V2RAY+Converter+fix25fix.html"
 
 def decrypt_via_api(happ_link):
-    # Пауза, чтобы не ловить 500 от API при спаме
-    time.sleep(random.uniform(0.5, 1.0))
     api_url = "https://api.sayori.cc/v1/decrypt"
     headers = {"Content-Type": "application/json", "x-api-key": SAYORI_KEY}
     payload = {"link": happ_link}
     try:
+        # Добавляем небольшую задержку, чтобы API Sayori не захлебнулось
+        time.sleep(1)
         res = requests.post(api_url, json=payload, headers=headers, timeout=15)
-        if res.status_code == 200:
-            d = res.json()
-            return d.get("result") if d.get("success") else None
-    except: pass
-    return None
+        
+        # Если API Sayori само выдает 500, значит проблема в ключе или лимите ключа
+        if res.status_code != 200:
+            print(f"Sayori API Error: {res.status_code}")
+            return None
+            
+        return res.json().get("result")
+    except: 
+        return None
 
 def extract_from_atlanta_meta(html_text):
     """Извлекает скрытую ссылку из data-panel (Атланта)"""
