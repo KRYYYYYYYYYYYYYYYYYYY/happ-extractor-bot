@@ -117,7 +117,7 @@ def fetch_and_report(chat_id, original_url, proxy_url, message_id):
     content = ""
     error_code = None
     
-    # 1. Загрузка данных
+    # 1. ЗАГРУЗКА (берем полные данные)
     for url_to_try in [proxy_url, original_url]:
         try:
             headers = {'User-Agent': random.choice(USER_AGENTS)}
@@ -136,48 +136,50 @@ def fetch_and_report(chat_id, original_url, proxy_url, message_id):
                               chat_id, message_id, reply_markup=kb)
         return
 
-    # 2. ДЕКОДИРОВАНИЕ (превращаем Base64 в читаемый текст ДО подсчета)
+    # 2. ДЕКОДИРОВАНИЕ (превращаем в текст ПЕРЕД подсчетом)
     final_data = content
     is_base64_encoded = False
     
-    try:
-        # Если в тексте нет стандартных разделителей протоколов, пробуем Base64
-        if "://" not in content[:100] and "{" not in content[:50]:
-            # Убираем лишние пробелы/переносы для корректного b64
-            clean_b64 = re.sub(r'[^a-zA-Z0-9+/=]', '', content)
+    # Пробуем декодировать Base64, если это не прямой список ссылок и не JSON
+    if "://" not in content[:100] and "{" not in content[:50]:
+        try:
+            # Очищаем только от пробельных символов, сохраняя всю длину
+            clean_b64 = "".join(content.split()) 
             decoded = base64.b64decode(clean_b64).decode('utf-8', errors='ignore')
             if "://" in decoded or "{" in decoded:
                 final_data = decoded
                 is_base64_encoded = True
-    except:
-        pass
+        except:
+            pass
 
-    # Сохраняем финальный (чистый) результат
+    # Сохраняем ПОЛНЫЕ данные в память
     user_storage[chat_id]['content'] = final_data
 
-    # 3. АНАЛИЗ (теперь считаем узлы в уже расшифрованном тексте)
+    # 3. АНАЛИЗ (считаем узлы в ПОЛНОСТЬЮ готовом тексте)
     links = re.findall(r'(?:vless|vmess|ss|trojan|shadowsocks|tuic|hysteria2?)://[^\r\n"\'<>#\s]+', final_data)
     
-    # Определяем формат для красивого отчета
+    # Определяем формат
     if '"outbounds"' in final_data or '"nodes"' in final_data:
         format_type = "🛠 JSON Config"
     elif is_base64_encoded:
-        format_type = "📦 Base64 Subscription"
+        format_type = "📦 Base64 (Decoded)"
     elif links:
         format_type = "🔗 Plain Text List"
     else:
-        format_type = "📄 Unknown/Raw Text"
+        format_type = "📄 Raw Data"
 
     crypt_info = f"🔑 Ключ: `{user_storage[chat_id].get('crypt_ver', 'auto')}`\n" if user_storage[chat_id].get('crypt_ver') else ""
     
-    # 4. ФИНАЛЬНЫЙ ОТЧЕТ
+    # 4. ФИНАЛЬНЫЙ ОТЧЕТ (сокращаем только визуально в тексте!)
+    def short(url): return (url[:45] + "...") if len(url) > 45 else url
+
     report = (
         f"✅ **Обработано успешно**\n"
         f"{crypt_info}"
         f"📂 **Формат:** `{format_type}`\n"
         f"📊 **Найдено узлов:** `{len(links)}` шт.\n\n"
-        f"🔗 **Ссылка-источник:**\n`{original_url[:60]}...`\n\n"
-        f"🌐 **Прокси-зеркало:**\n`{proxy_url[:60]}...`"
+        f"🔗 **Источник:**\n`{short(original_url)}`\n\n"
+        f"🌐 **Прокси:**\n`{short(proxy_url)}`"
     )
     
     kb = types.InlineKeyboardMarkup()
