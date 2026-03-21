@@ -17,8 +17,12 @@ bot = telebot.TeleBot(TOKEN)
 user_storage = {}
 
 USER_AGENTS = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'v2rayNG/1.8.5 (com.v2ray.ang; build 100805; Android 13)'
+    'v2rayNG/1.8.5 (com.v2ray.ang; build 100805; Android 13)',
+    'ClashforWindows/0.20.39',
+    'Clash-verge/1.3.8',
+    'Shadowrocket/2.2.38 (iPhone; iOS 17.0.1; Scale/3.00)',
+    'Quantumult%20X/1.4.3 (iPhone; iOS 17.0.1; Scale/3.00)',
+    'Stash/2.4.5 (iPhone; iOS 17.0.1; Scale/3.00)'
 ]
 
 def decrypt_via_api(happ_link):
@@ -123,21 +127,33 @@ def fetch_and_report(chat_id, original_url, proxy_url, message_id):
     
     for url_to_try in [proxy_url, original_url]:
         try:
-            headers = {'User-Agent': random.choice(USER_AGENTS)}
-            res = scraper.get(url_to_try, headers=headers, timeout=15)
+            # Берем случайный агент из "профильных" (v2ray/clash)
+            headers = {
+                'User-Agent': random.choice(USER_AGENTS),
+                'Accept': 'text/plain, */*' # Явно просим текстовый формат
+            }
             
-            if res.status_code == 200 and len(res.text) > 10:
-                content = res.text.strip()
-                break
+            res = scraper.get(url_to_try, headers=headers, timeout=15, allow_redirects=True)
+            
+            if res.status_code == 200:
+                # ГЛАВНАЯ ПРОВЕРКА: если это HTML, то это не наши данные
+                if "<html" in res.text.lower() or "<!doctype" in res.text.lower():
+                    error_code = "HTML_BLOCKED"
+                    continue # Пробуем следующую ссылку (например, original после proxy)
+                
+                if len(res.text) > 10:
+                    content = res.text.strip()
+                    break
             error_code = res.status_code
         except Exception as e:
-            error_code = f"ConnError: {str(e)[:15]}"
+            error_code = f"Error: {str(e)[:15]}"
 
-    if not content:
+    # Проверка: не скачали ли мы вместо конфигов HTML-страницу?
+    if content.startswith("<!DOCTYPE") or "<html" in content[:100].lower():
         kb = types.InlineKeyboardMarkup()
         kb.add(types.InlineKeyboardButton("🔄 Повторить", callback_data="retry_last"))
-        bot.edit_message_text(f"❌ Ошибка загрузки (Код: {error_code})\n\nСервер не ответил или контент пуст.", 
-                              chat_id, message_id, reply_markup=kb)
+        bot.edit_message_text(f"⚠️ **Ошибка: Сайт заблокировал бота**\n\nВместо ссылок пришла веб-страница. Возможно, включена защита Cloudflare или ссылка ведет на документацию, а не на файл.", 
+                              chat_id, message_id, reply_markup=kb, parse_mode='Markdown')
         return
 
     # --- ЛОГИКА ОБРАБОТКИ КОНТЕНТА ---
