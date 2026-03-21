@@ -20,7 +20,9 @@ jobs:
           python-version: '3.9'
 
       - name: Install dependencies
-        run: pip install pyTelegramBotAPI requests
+        run: |
+          pip install pyTelegramBotAPI requests
+          pip install cloudscraper
 
       - name: Run Bot
         env:
