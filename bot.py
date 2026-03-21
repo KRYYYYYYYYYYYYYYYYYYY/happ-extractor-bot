@@ -8,7 +8,6 @@ import time
 import json
 from urllib.parse import unquote
 from telebot import types
-import cloudscraper 
 
 TOKEN = os.getenv('TELEGRAM_TOKEN')
 SAYORI_KEY = os.getenv('SAYORI_KEY')
@@ -121,52 +120,42 @@ def fetch_and_report(chat_id, original_url, proxy_url, message_id):
     content = ""
     error_code = None
     
-    # Создаем "умный" сеанс, который умеет обходить Cloudflare
-    scraper = cloudscraper.create_scraper() 
-    
     for url_to_try in [proxy_url, original_url]:
         try:
             headers = {'User-Agent': random.choice(USER_AGENTS)}
-            # ЗАМЕНА: вместо requests.get используем scraper.get
-            res = scraper.get(url_to_try, headers=headers, timeout=15)
-            
+            res = requests.get(url_to_try, headers=headers, timeout=15)
             if res.status_code == 200 and len(res.text) > 10:
                 content = res.text.strip()
                 break
             error_code = res.status_code
-        except Exception as e:
-            error_code = f"Error: {str(e)[:20]}" # Записываем текст ошибки для отладки
+        except:
+            error_code = "Timeout"
 
     if not content:
         kb = types.InlineKeyboardMarkup()
         kb.add(types.InlineKeyboardButton("🔄 Повторить", callback_data="retry_last"))
-        bot.edit_message_text(f"❌ Ошибка загрузки (Код: {error_code})\n\nСервер недоступен или защищен. Попробуйте снова.", 
+        bot.edit_message_text(f"❌ Ошибка загрузки (Код: {error_code})\n\nСервер недоступен. Попробуйте нажать повтор.", 
                               chat_id, message_id, reply_markup=kb)
         return
-
-    # --- Улучшенный блок декодирования ---
+        
+    content = res.text.strip()
     final_data = content
+    # Пытаемся декодировать, если это похоже на Base64
     try:
-        # Убираем все переносы и пробелы, которые ломают Base64
-        clean_b64 = "".join(content.split())
+        # Убираем лишние пробелы/переносы для Base64
+        b64_candidate = "".join(content.split())
+        decoded = base64.b64decode(b64_candidate).decode('utf-8', errors='ignore')
         
-        # Пытаемся декодировать
-        decoded = base64.b64decode(clean_b64).decode('utf-8', errors='ignore')
-        
-        # Проверяем, есть ли в декодированном тексте признаки конфигов
-        protocols = ['vless://', 'vmess://', 'ss://', 'trojan://', 'hy2://', 'tuic://', '{']
+        # Проверяем, появились ли протоколы после декодирования
+        protocols = ['vless://', 'vmess://', 'ss://', 'trojan://']
         if any(proto in decoded for proto in protocols):
             final_data = decoded
-    except:
-        # Если это не Base64, оставляем исходный текст (final_data = content)
-        pass
+    except Exception as e:
+        print(f"Ошибка декодирования: {e}")
 
     user_storage[chat_id]['content'] = final_data
-    
-    # Поиск ссылок с использованием \S+ (до первого пробела)
     links = re.findall(r'(?:vless|vmess|ss|trojan|shadowsocks|tuic|hysteria2?)://\S+', final_data)
     
-    # --- Формирование отчета ---
     crypt_info = f"🔑 Ключ: `{user_storage[chat_id].get('crypt_ver', 'auto')}`\n" if user_storage[chat_id].get('crypt_ver') else ""
     
     report = (
@@ -179,7 +168,6 @@ def fetch_and_report(chat_id, original_url, proxy_url, message_id):
     
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("📥 Скачать файл", callback_data="get_all"))
-    kb.add(types.InlineKeyboardButton("🔄 Обновить", callback_data="retry_last"))
     
     bot.edit_message_text(report, chat_id, message_id, parse_mode='Markdown', reply_markup=kb, disable_web_page_preview=True)
 
