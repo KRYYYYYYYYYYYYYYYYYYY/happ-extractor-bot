@@ -136,16 +136,24 @@ def fetch_and_report(chat_id, original_url, proxy_url, message_id):
         return
 
     # Base64 Check
+    content = res.text.strip()
     final_data = content
+
+    # Пытаемся декодировать, если это похоже на Base64
     try:
-        # Проверка: если контент не похож на конфиг, пробуем декодировать b64
-        if "://" not in content[:50] and "{" not in content[:20]:
-            decoded = base64.b64decode(content).decode('utf-8', errors='ignore')
-            if "://" in decoded or "{" in decoded: final_data = decoded
-    except: pass
+        # Убираем лишние пробелы/переносы для Base64
+        b64_candidate = "".join(content.split())
+        decoded = base64.b64decode(b64_candidate).decode('utf-8', errors='ignore')
+        
+        # Проверяем, появились ли протоколы после декодирования
+        protocols = ['vless://', 'vmess://', 'ss://', 'trojan://']
+        if any(proto in decoded for proto in protocols):
+            final_data = decoded
+    except Exception as e:
+        print(f"Ошибка декодирования: {e}")
 
     user_storage[chat_id]['content'] = final_data
-    links = re.findall(r'(?:vless|vmess|ss|trojan|shadowsocks|tuic|hysteria2?)://[^\r\n"\'<>#]+', final_data)
+    links = re.findall(r'(?:vless|vmess|ss|trojan|shadowsocks|tuic|hysteria2?)://\S+', final_data)
     
     # Инфо о типе ключа
     crypt_type = user_storage[chat_id].get('crypt_ver') or "direct/web"
