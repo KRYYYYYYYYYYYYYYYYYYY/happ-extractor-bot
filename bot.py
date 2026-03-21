@@ -24,22 +24,28 @@ USER_AGENTS = [
 CONVERTER_URL = "https://cs12d7a.4pda.ws/34581412/V2RAY+Converter+fix25fix.html"
 
 def decrypt_via_api(happ_link):
+    """Улучшенная расшифровка с защитой от 500 ошибки."""
     api_url = "https://api.sayori.cc/v1/decrypt"
     headers = {"Content-Type": "application/json", "x-api-key": SAYORI_KEY}
     payload = {"link": happ_link.strip()}
     
-    # Пытаемся 3 раза, если сервер тупит
-    for attempt in range(3):
+    # Для длинных crypt3 ссылок увеличиваем количество попыток
+    max_attempts = 3
+    for attempt in range(max_attempts):
         try:
-            res = requests.post(api_url, json=payload, headers=headers, timeout=15)
+            # Увеличиваем таймаут, crypt3 может расшифровываться долго
+            res = requests.post(api_url, json=payload, headers=headers, timeout=25)
+            
             if res.status_code == 200:
                 data = res.json()
                 if data.get("success"):
                     return data.get("result")
-            elif res.status_code == 500:
-                # Если 500, ждем чуть дольше с каждой попыткой
-                time.sleep(2 * (attempt + 1))
+            
+            # Если Sayori выдал 500, ждем и пробуем снова
+            if res.status_code == 500:
+                time.sleep(attempt + 2) 
                 continue
+                
         except Exception:
             time.sleep(1)
             continue
@@ -90,6 +96,8 @@ def extract_happ_anywhere(text_or_url):
 @bot.message_handler(func=lambda m: True)
 def handle_message(m):
     text = m.text.strip()
+    
+    # 1. Сначала ищем саму ссылку happ://
     target_link = extract_happ_anywhere(text)
     
     if not target_link:
@@ -98,14 +106,23 @@ def handle_message(m):
             bot.reply_to(m, "❌ Ссылка не распознана.")
             return
 
-    status_msg = bot.reply_to(m, "⏳ *Обработка...*", parse_mode='Markdown')
+    status_msg = bot.reply_to(m, "⏳ *Расшифровка Sayori...*", parse_mode='Markdown')
     
+    final_url = None
     if target_link.startswith('happ://'):
-        decrypted = decrypt_via_api(target_link)
-        final_url = decrypted if decrypted else target_link
+        # Пытаемся расшифровать
+        final_url = decrypt_via_api(target_link)
+        
+        if not final_url:
+            bot.edit_message_text("❌ Sayori API не справился с этой ссылкой (Ошибка 500).\n"
+                                  "Возможно, ссылка слишком длинная или API перегружен.", 
+                                  m.chat.id, status_msg.message_id)
+            return
     else:
         final_url = target_link
     
+    # Если расшифровка прошла успешно, идем качать сам конфиг
+    bot.edit_message_text("⏳ *Загрузка конфигурации...*", m.chat.id, status_msg.message_id, parse_mode='Markdown')
     fetch_and_report(m.chat.id, final_url, status_msg.message_id)
 
 def fetch_and_report(chat_id, sub_url, message_id):
