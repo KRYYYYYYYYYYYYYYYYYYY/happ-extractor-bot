@@ -8,6 +8,7 @@ import time
 import json
 from urllib.parse import unquote
 from telebot import types
+import cloudscraper
 
 TOKEN = os.getenv('TELEGRAM_TOKEN')
 SAYORI_KEY = os.getenv('SAYORI_KEY')
@@ -117,47 +118,68 @@ def fetch_and_report(chat_id, original_url, proxy_url, message_id):
     content = ""
     error_code = None
     
+    # Создаем скрейпер для обхода Cloudflare
+    scraper = cloudscraper.create_scraper()
+    
     for url_to_try in [proxy_url, original_url]:
         try:
             headers = {'User-Agent': random.choice(USER_AGENTS)}
-            res = requests.get(url_to_try, headers=headers, timeout=15)
+            res = scraper.get(url_to_try, headers=headers, timeout=15)
+            
             if res.status_code == 200 and len(res.text) > 10:
                 content = res.text.strip()
                 break
             error_code = res.status_code
-        except:
-            error_code = "Timeout"
+        except Exception as e:
+            error_code = f"ConnError: {str(e)[:15]}"
 
     if not content:
         kb = types.InlineKeyboardMarkup()
         kb.add(types.InlineKeyboardButton("🔄 Повторить", callback_data="retry_last"))
-        bot.edit_message_text(f"❌ Ошибка загрузки (Код: {error_code})\n\nКонтент не найден. Возможно, это страница-заглушка.", 
+        bot.edit_message_text(f"❌ Ошибка загрузки (Код: {error_code})\n\nСервер не ответил или контент пуст.", 
                               chat_id, message_id, reply_markup=kb)
         return
 
-    # Base64 Check
-    content = res.text.strip()
-    final_data = content
+    # --- ЛОГИКА ОБРАБОТКИ КОНТЕНТА ---
+    all_found_links = []
+    # Улучшенное регулярное выражение (не ломается на решетке в конце)
+    pattern = r'(?:vless|vmess|ss|trojan|shadowsocks|tuic|hysteria2?)://[^\s\r\n"\'<>]+'
 
-    # Пытаемся декодировать, если это похоже на Base64
+    # 1. Ищем ссылки "как есть" в полученном тексте
+    direct_links = re.findall(pattern, content)
+    all_found_links.extend(direct_links)
+
+    # 2. Пробуем декодировать ВЕСЬ текст (на случай, если это стандартный Base64 подписки)
     try:
-        # Убираем лишние пробелы/переносы для Base64
-        b64_candidate = "".join(content.split())
-        decoded = base64.b64decode(b64_candidate).decode('utf-8', errors='ignore')
+        clean_b64 = "".join(content.split())
+        # Добавляем padding если нужно, чтобы base64 не ругался
+        missing_padding = len(clean_b64) % 4
+        if missing_padding:
+            clean_b64 += '=' * (4 - missing_padding)
+            
+        decoded = base64.b64decode(clean_b64).decode('utf-8', errors='ignore')
         
-        # Проверяем, появились ли протоколы после декодирования
-        protocols = ['vless://', 'vmess://', 'ss://', 'trojan://']
-        if any(proto in decoded for proto in protocols):
-            final_data = decoded
-    except Exception as e:
-        print(f"Ошибка декодирования: {e}")
+        # Если в декодированном тексте есть протоколы — собираем их
+        if any(p in decoded for p in ['vless://', 'vmess://', 'ss://', 'trojan://']):
+            b64_links = re.findall(pattern, decoded)
+            all_found_links.extend(b64_links)
+    except:
+        pass # Если это не Base64, просто идем дальше
+
+    # 3. Удаляем дубликаты, сохраняя порядок
+    links = list(dict.fromkeys(all_found_links))
+    
+    # Формируем итоговые данные (список ссылок в столбик)
+    if links:
+        final_data = "\n".join(links)
+    else:
+        final_data = content # Если ссылок нет, оставляем как было (может там JSON)
 
     user_storage[chat_id]['content'] = final_data
-    links = re.findall(r'(?:vless|vmess|ss|trojan|shadowsocks|tuic|hysteria2?)://\S+', final_data)
     
-    # Инфо о типе ключа
-    crypt_type = user_storage[chat_id].get('crypt_ver') or "direct/web"
-    crypt_info = f"🔑 Тип: `{crypt_type}`\n"
+    # --- ФОРМИРОВАНИЕ ОТЧЕТА ---
+    crypt_type = user_storage[chat_id].get('crypt_ver') or "auto/web"
+    crypt_info = f"🔑 Тип обработки: `{crypt_type}`\n"
     
     report = (
         f"✅ **Данные получены**\n"
@@ -171,8 +193,9 @@ def fetch_and_report(chat_id, original_url, proxy_url, message_id):
     kb.add(types.InlineKeyboardButton("📥 Скачать файл", callback_data="get_all"))
     kb.add(types.InlineKeyboardButton("🔄 Обновить", callback_data="retry_last"))
     
-    bot.edit_message_text(report, chat_id, message_id, parse_mode='Markdown', reply_markup=kb, disable_web_page_preview=True)
-
+    bot.edit_message_text(report, chat_id, message_id, parse_mode='Markdown', 
+                          reply_markup=kb, disable_web_page_preview=True)
+    
 @bot.callback_query_handler(func=lambda c: True)
 def callback_handler(call):
     chat_id = call.message.chat.id
