@@ -352,12 +352,11 @@ def fetch_and_report(chat_id, original_url, proxy_url, message_id):
         'decode_state': decode_state
     }
     crypt_type = user_storage[chat_id].get('crypt_ver') or "auto/web"
-    cjson_note = "да" if json_like_found else "нет"
     
     report = (
         "✅ **Данные получены**\n"
         f"🔑 Тип обработки: `{crypt_type}`\n"
-        f"🧩 JSON обнаружен: `{json_note}`\n"
+        f"🧩 JSON обнаружен: `{'да' if json_like_found else 'нет'}`\n"
         f"🔓 Состояние: `{decode_state}`\n\n"
         f"🔗 **Источник:**\n`{original_url}`\n\n"
         f"🌐 **Прокси:**\n`{proxy_url}`\n\n"
