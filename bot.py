@@ -6,7 +6,7 @@ import base64
 import random
 import time
 import json
-from urllib.parse import unquote
+from urllib.parse import unquote, quote, urlencode, parse_qsl, urlsplit, urlunsplit
 from telebot import types
 import cloudscraper
 
@@ -16,6 +16,7 @@ SAYORI_KEY = os.getenv('SAYORI_KEY')
 
 bot = telebot.TeleBot(TOKEN)
 user_storage = {}
+STORAGE_TTL_SECONDS = 5 * 60 * 60
 
 USER_AGENTS = [
     'v2rayNG/1.8.5 (com.v2ray.ang; build 100805; Android 13)',
@@ -29,6 +30,92 @@ USER_AGENTS = [
 NODE_PATTERN = re.compile(r'(?:vless|vmess|ss|trojan|shadowsocks|tuic|hysteria2?)://[^\s\r\n"\'<>]+', re.IGNORECASE)
 HTTP_PATTERN = re.compile(r'https?://[^\s\r\n"\'<>]+', re.IGNORECASE)
 BASE64_PATTERN = re.compile(r'^[A-Za-z0-9+/=_-]{24,}$')
+
+
+def cleanup_user_storage():
+    now = time.time()
+    expired = [
+        chat_id for chat_id, payload in user_storage.items()
+        if now - payload.get('updated_at', 0) > STORAGE_TTL_SECONDS
+    ]
+    for chat_id in expired:
+        user_storage.pop(chat_id, None)
+
+
+def is_storage_expired(chat_id):
+    payload = user_storage.get(chat_id) or {}
+    updated_at = payload.get('updated_at')
+    return not updated_at or (time.time() - updated_at > STORAGE_TTL_SECONDS)
+
+
+def normalize_node_link(link):
+    clean = link.strip().strip('\'"')
+    if not clean:
+        return None
+
+    # Частая "билеберда" в файлах — URL encoded названия/флаги в конце ссылки.
+    # Декодируем до двух проходов, чтобы получить читабельный текст.
+    for _ in range(2):
+        decoded = unquote(clean)
+        if decoded == clean:
+            break
+        clean = decoded
+
+    try:
+        parts = urlsplit(clean)
+    except Exception:
+        return clean
+
+    # Делает fragment человекочитаемым (например "#🇩🇪 Белые списки 1")
+    fragment = unquote(parts.fragment) if parts.fragment else ''
+
+    # Параметры тоже раскрываем, но в корректном URL-формате
+    query_pairs = parse_qsl(parts.query, keep_blank_values=True)
+    if query_pairs:
+        query = urlencode(
+            [(unquote(str(k)), unquote(str(v))) for k, v in query_pairs],
+            doseq=True,
+            quote_via=quote,
+            safe=':@-._~'
+        )
+    else:
+        query = ''
+
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, query, fragment))
+
+
+def deduplicate_links_preserve_best_name(links):
+    """
+    Убирает дубликаты одного и того же узла (одинаковый URL без fragment),
+    но оставляет вариант с самым информативным именем в fragment.
+    """
+    best_by_key = {}
+    key_order = []
+
+    for raw_link in links:
+        if not raw_link:
+            continue
+        try:
+            parts = urlsplit(raw_link)
+            key = urlunsplit((parts.scheme, parts.netloc, parts.path, parts.query, ''))
+            fragment = (parts.fragment or '').strip()
+        except Exception:
+            key = raw_link
+            fragment = ''
+
+        # Приоритет: более длинный fragment обычно содержит "оригинальное" название,
+        # а короткие дубли типа "#🇩🇪" должны проигрывать.
+        score = len(fragment)
+        if key not in best_by_key:
+            best_by_key[key] = (score, raw_link)
+            key_order.append(key)
+            continue
+
+        prev_score, _ = best_by_key[key]
+        if score > prev_score:
+            best_by_key[key] = (score, raw_link)
+
+    return [best_by_key[k][1] for k in key_order]
 
 def decrypt_via_api(happ_link):
     api_url = "https://api.sayori.cc/v1/decrypt"
@@ -225,7 +312,13 @@ def analyze_subscription_content(content, max_depth=5):
             if unquoted != normalized:
                 queue.append((unquoted, depth + 1))
 
-    dedup_links = list(dict.fromkeys(links))
+    normalized_links = []
+    for link in links:
+        normalized = normalize_node_link(link)
+        if normalized:
+            normalized_links.append(normalized)
+
+    dedup_links = deduplicate_links_preserve_best_name(list(dict.fromkeys(normalized_links)))
     dedup_nested = list(dict.fromkeys(nested_urls))
     return dedup_links, dedup_nested, json_like_found
 
@@ -281,6 +374,7 @@ def handle_message(m):
     process_link(m.chat.id, target_url, status_msg.message_id, crypt_ver)
 
 def process_link(chat_id, target_url, message_id, crypt_ver=None):
+    cleanup_user_storage()
     final_url = target_url
     
     # Не расшифровываем то, что уже явно декодировано (не happ)
@@ -344,6 +438,7 @@ def fetch_and_report(chat_id, original_url, proxy_url, message_id):
         decode_state = "не раскрыта"
 
     user_storage[chat_id]['content'] = final_data
+    user_storage[chat_id]['updated_at'] = time.time()
     
     user_storage[chat_id]['last_report'] = {
         'nodes': len(links),
@@ -361,7 +456,8 @@ def fetch_and_report(chat_id, original_url, proxy_url, message_id):
         f"🔗 **Источник:**\n`{original_url}`\n\n"
         f"🌐 **Прокси:**\n`{proxy_url}`\n\n"
         f"📦 Вложенных URL найдено: `{len(nested_urls)}`\n"
-        f"📊 Найдено узлов: `{len(links)}`"
+        f"📊 Найдено узлов: `{len(links)}`\n"
+        "⏱️ Доступ к скачиванию: `5 часов`"
     )
     
     kb = types.InlineKeyboardMarkup()
@@ -380,7 +476,12 @@ def fetch_and_report(chat_id, original_url, proxy_url, message_id):
 @bot.callback_query_handler(func=lambda c: True)
 def callback_handler(call):
     chat_id = call.message.chat.id
+    cleanup_user_storage()
     if call.data == "get_all":
+        if is_storage_expired(chat_id):
+            user_storage.pop(chat_id, None)
+            bot.answer_callback_query(call.id, "Данные истекли (лимит 5 часов). Отправьте ссылку заново.")
+            return
         data = user_storage.get(chat_id, {}).get('content')
         if not data:
             bot.answer_callback_query(call.id, "Данные устарели.")
@@ -396,6 +497,10 @@ def callback_handler(call):
         bot.answer_callback_query(call.id, "Файл отправлен")
         
     elif call.data == "retry_last":
+        if is_storage_expired(chat_id):
+            user_storage.pop(chat_id, None)
+            bot.answer_callback_query(call.id, "Лимит хранения 5 часов истёк. Пришлите ссылку снова.")
+            return
         last_url = user_storage.get(chat_id, {}).get('last_url')
         crypt_ver = user_storage.get(chat_id, {}).get('crypt_ver')
         if last_url:
