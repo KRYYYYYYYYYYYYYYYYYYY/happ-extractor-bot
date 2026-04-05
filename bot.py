@@ -83,6 +83,40 @@ def normalize_node_link(link):
 
     return urlunsplit((parts.scheme, parts.netloc, parts.path, query, fragment))
 
+
+def deduplicate_links_preserve_best_name(links):
+    """
+    Убирает дубликаты одного и того же узла (одинаковый URL без fragment),
+    но оставляет вариант с самым информативным именем в fragment.
+    """
+    best_by_key = {}
+    key_order = []
+
+    for raw_link in links:
+        if not raw_link:
+            continue
+        try:
+            parts = urlsplit(raw_link)
+            key = urlunsplit((parts.scheme, parts.netloc, parts.path, parts.query, ''))
+            fragment = (parts.fragment or '').strip()
+        except Exception:
+            key = raw_link
+            fragment = ''
+
+        # Приоритет: более длинный fragment обычно содержит "оригинальное" название,
+        # а короткие дубли типа "#🇩🇪" должны проигрывать.
+        score = len(fragment)
+        if key not in best_by_key:
+            best_by_key[key] = (score, raw_link)
+            key_order.append(key)
+            continue
+
+        prev_score, _ = best_by_key[key]
+        if score > prev_score:
+            best_by_key[key] = (score, raw_link)
+
+    return [best_by_key[k][1] for k in key_order]
+
 def decrypt_via_api(happ_link):
     api_url = "https://api.sayori.cc/v1/decrypt"
     headers = {"Content-Type": "application/json", "x-api-key": SAYORI_KEY}
@@ -284,7 +318,7 @@ def analyze_subscription_content(content, max_depth=5):
         if normalized:
             normalized_links.append(normalized)
 
-    dedup_links = list(dict.fromkeys(normalized_links))
+    dedup_links = deduplicate_links_preserve_best_name(list(dict.fromkeys(normalized_links)))
     dedup_nested = list(dict.fromkeys(nested_urls))
     return dedup_links, dedup_nested, json_like_found
 
